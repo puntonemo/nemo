@@ -1,6 +1,6 @@
 {
   "name": "nemo3",
-  "version": "3.0.11",
+  "version": "3.0.12",
   "homepage": "https://puntonemo.com",
   "main": "index.ts",
   "devDependencies": {
