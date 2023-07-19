@@ -61,44 +61,46 @@ export type Service = {
     excludeFromReplicas?:boolean,   // Exclude this service from remote replicas
     serviceState?:ServiceState 
 }
-export type EngineHttpsConfig = {
-    PORT: number,
-    KEY_FILE : string,
-    CERT_FILE : string,
-    CA_FILE: string,
-    PASSPHRASE: string,
-    CIPHERS: string
-}
 export type EngineConfig = {
     CONFIG_NAME:string,
-    HTTPS?:EngineHttpsConfig,
-    HTTP:{
-        PORT:number
-    }
+    PORT : number,
+    HTTPS_PORT? : number,
+    HTTPS_KEY_FILE? : string,
+    HTTPS_CERT_FILE? : string,
+    HTTPS_CA_FILE? : string,
+    HTTPS_PASSPHRASE? : string,
+    HTTPS_CIPHERS? : string
     MAX_BODY_SIZE?: string,
     MAX_HTTP_BUFFER_SIZE?: number,
-    MODULES_PATH: string,
-    MODULES: string[]
+    MODULES_PATH? : string,
+    MODULES? : string[],
+    GATEWAY_KEEP_ALIVE_INTERVAL? : number,
+    GATEWAY_KEEP_ALIVE_RETRY_INTERVAL? : number,
+    GATEWAY_KEEP_ALIVE_MAX_RETRIES? : number,
+    GATEWAY_AUTO_ATTACH_PASSKEY? : string
 }
 export type EngineServersConfig = {
     HOST:string,
     PASSKEY:string,
-    LIVE:boolean
+    LIVE?:boolean
     REPLICA?:boolean,
-    DESCRIPTION?:string
+    NAME?:string
 }
 export type EngineGatewayConfig = {
     REMOTE_HOST:string,
     LOCAL_HOST:string,
     PASSKEY:string,
-    REPLICA?:boolean
+    REPLICA?:boolean,
+    LIVE?:boolean,
+    AUTO_ATTACH_PASSKEY? : string   
 }
 
 export type RemoteServerConfig = {
     passkey:string,
     live:boolean,
     replica: boolean,
-    serverConnection?:ServerConnection|undefined
+    serverConnection?:ServerConnection|undefined,
+    name?:string
 }
 
 export type GatewayConfig = RemoteServerConfig & {

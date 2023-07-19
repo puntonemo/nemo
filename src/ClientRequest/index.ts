@@ -179,4 +179,5 @@ export default class ClientRequest {
     get socket() { return this._socket; }
     get remoteSetCookie() {return this._remoteSetCookie}
     get remoteRedirect() {return this._remoteRedirect}
+    get fetch() { return Core.fetch}
 }

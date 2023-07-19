@@ -2,7 +2,7 @@ import express, {Request, Response} from 'express'
 import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
-import { parseCookie, makeid } from './tools';
+import { parseCookie, makeid, fetch } from './tools';
 import { Socket } from 'socket.io';
 import path from 'path';
 import * as ExpressCore from 'express-serve-static-core';
@@ -15,11 +15,12 @@ import { RedisClientType } from 'redis';
 import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
+import { hostname } from 'os';
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig};
+export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, fetch};
 
-const ServerVersion = '3.0.12';
-const ServerBuildNumber = 16896384; // Date.parse('2023-07-18').valueOf()/100000
+export const ServerVersion = '3.0.13';
+export const ServerBuildNumber = 16897248; // Date.parse('2023-07-18').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -36,28 +37,27 @@ export var staticServices:{method:string, path:string}[] = [];
 export var redisClient:RedisClientType | undefined;
 export var redisClientEnabled:boolean;
 
-export var coreConfig:EngineConfig;
-export var coreGatewayConfig:EngineGatewayConfig | undefined;
-export var coreServersConfig:EngineServersConfig[] | undefined;
+export var config:EngineConfig;
+export var gatewayConfig:EngineGatewayConfig | undefined;
+export var serversConfig:EngineServersConfig[] | undefined;
 //export var coreProcessRoot = process.argv.length>0 ? process.argv[1].split('/').slice(0,-1).join('/') : process.env.PWD;
 
 var modules:Map<string, ModuleConfig> = new Map();
 
-const startEngine = (config:EngineConfig, gatewayConfig?:EngineGatewayConfig, serversConfig?:EngineServersConfig[], redisConfig?:string|boolean) => {
-    coreConfig = config;
-    coreGatewayConfig = gatewayConfig;
-    coreServersConfig = serversConfig;
+const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], redisConfig?:string|boolean) => {
+    config = engineConfig;
+    gatewayConfig = engineGatewayConfig;
+    serversConfig = engineServersConfig;
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
     console.clear();
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
-    console.log(`\x1b[32m Config Name: \x1b[1m\x1b[34m${coreConfig.CONFIG_NAME} \x1b[0m`);
+    console.log(`\x1b[32m Config Name: \x1b[1m\x1b[34m${config.CONFIG_NAME} \x1b[0m`);
     console.log(`\x1b[32m================================================================ \x1b[0m`)
-    console.log(`\x1b[32mprocessPath:\x1b[0m \x1b[34m${process.argv[1].split('/').slice(0,-1).join('/')}\x1b[0m`);
-    const {expressApp, httpServer, httpsServer} = setHttp(coreConfig);
+    const {expressApp, httpServer, httpsServer} = setHttp(config);
     app = expressApp;
-    ioServerOverHttp = setSocket(httpServer, coreConfig);
-    if(httpsServer) ioServerOverHttps = setSocket(httpsServer, coreConfig);
+    ioServerOverHttp = setSocket(httpServer, config);
+    if(httpsServer) ioServerOverHttps = setSocket(httpsServer, config);
     ioServerOverHttp.of("/servers").on("connection", manageWSServerConnection);
     if(httpsServer) ioServerOverHttps.of("/servers").on("connection", manageWSServerConnection);
     ioServerOverHttp.on('connection', manageWSClientConnection);
@@ -114,11 +114,11 @@ const startEngine = (config:EngineConfig, gatewayConfig?:EngineGatewayConfig, se
                     serviceState: "stateless",
                     manager:getGatewayServiceManager
                 });
-                httpServer.listen(coreConfig.HTTP.PORT);
-                console.log(`\x1b[32mListening on port \x1b[34m${coreConfig.HTTP.PORT}\x1b[0m`);
-                if(httpsServer && coreConfig.HTTPS?.PORT){
-                    httpsServer.listen(coreConfig.HTTPS?.PORT);
-                    console.log(`\x1b[32mListening on port \x1b[34m${coreConfig.HTTPS.PORT}\x1b[0m`);
+                httpServer.listen(config.PORT);
+                console.log(`\x1b[32mListening on port \x1b[34m${config.PORT}\x1b[0m`);
+                if(httpsServer && config.HTTPS_PORT){
+                    httpsServer.listen(config.HTTPS_PORT);
+                    console.log(`\x1b[32mListening on port \x1b[34m${config.HTTPS_PORT}\x1b[0m`);
                 }
                 console.log(`\x1b[32m================================================================\x1b[0m`)
                 events.emit('serverReady');
@@ -131,7 +131,7 @@ const startEngine = (config:EngineConfig, gatewayConfig?:EngineGatewayConfig, se
  * @param socket 
  */
 const manageWSServerConnection = (socket:Socket) => {
-    console.log('New server connection (WS)', socket.id);
+    console.log(`\x1b[34mGateway\x1b[0m is live \x1b[34m${socket.id}\x1b[0m`);
     events.emit('serverConnection', socket.id);
     socket.on('serverRequest', (ServiceName, clientRequest, tid) => {
         console.log(`You're requesting (3) ${ServiceName} via WS-REMOTE-API`, tid);
@@ -141,19 +141,18 @@ const manageWSServerConnection = (socket:Socket) => {
         }
     });
     socket.on('disconnect', ()=>{
-        console.log(`Remote server disconnected (GATEWAY)`);
+        console.log(`\x1b[34mGateway\x1b[33m disconnected\x1b[0m`);
     })
     socket.on('handshake', (host, passkey, replica, dictionaryChangedEventName)=>{
-        if(host==coreGatewayConfig?.LOCAL_HOST && passkey==coreGatewayConfig?.PASSKEY){
-            if(coreGatewayConfig?.REMOTE_HOST){
-                console.log('\x1b[32mGATEWAY SUCCESSFULLY CONNECTED (WS)\x1b[0m');
+        if(host==gatewayConfig?.LOCAL_HOST && passkey==gatewayConfig?.PASSKEY){
+            if(gatewayConfig?.REMOTE_HOST){
+                console.log('\x1b[34mGateway\x1b[0m handshake finished\x1b[0m');
                 const gatewayConnected = ServerConnection.gatewayServer.find(gatewaySocket=>gatewaySocket.id == socket.id);
                 if(!gatewayConnected){
                     ServerConnection.gatewayServer.push(socket);
-                    if(coreGatewayConfig?.REPLICA === true || replica === true){
-                        ServerConnection.getServerReplica(coreGatewayConfig?.REMOTE_HOST, app, dictionaryChangedEventName).then(()=>{
-                            console.log('\x1b[32mTHIS SERVER IS NOW A REPLICA\x1b[0m');
-                            
+                    if(gatewayConfig?.REPLICA === true || replica === true){
+                        ServerConnection.getServerReplica(gatewayConfig?.REMOTE_HOST, app, dictionaryChangedEventName).then(()=>{
+                            console.log('\x1b[32mTHIS SERVER IS NOW A REPLICA\x1b[0m');                            
                         })
                     }
                 }
@@ -197,9 +196,9 @@ const startRedis = (redisConfig?:string|boolean):Promise<void> => new Promise(re
 })
 const importModules = ():Promise<void> => new Promise(resolve=>{
     const modulePromises:Promise<void>[] = []
-    if(coreConfig.MODULES && coreConfig.MODULES.length>0){
-        coreConfig.MODULES.forEach(async (module) => {
-            modulePromises.push(importModule(module));
+    if(config.MODULES && config.MODULES.length>0){
+        config.MODULES.forEach(async (module) => {
+            modulePromises.push(importModule(module.trim()));
         })
     }
 
@@ -210,28 +209,41 @@ const importModules = ():Promise<void> => new Promise(resolve=>{
 })
 const startRemotes = ():Promise<void> => new Promise(resolve=>{
     const remotesPromises:Promise<void|RemoteServerConfig>[] = []
-    if(coreGatewayConfig){
-        remotesPromises.push(ServerConnection.requestServerConnection(coreGatewayConfig.REMOTE_HOST, coreGatewayConfig.LOCAL_HOST, coreGatewayConfig.PASSKEY));
+    if(gatewayConfig){
+        remotesPromises.push(ServerConnection.requestServerConnection(gatewayConfig.REMOTE_HOST, gatewayConfig.LOCAL_HOST, gatewayConfig.PASSKEY, gatewayConfig.AUTO_ATTACH_PASSKEY, gatewayConfig.LIVE, gatewayConfig.REPLICA));
     }
-    if(coreServersConfig && coreServersConfig.length>0){
+    if(serversConfig && serversConfig.length>0){
         
-        for(const serverHost of coreServersConfig){
+        for(const serverHost of serversConfig){
             //ServerConnection.remoteServers.set(serverHost.HOST, {passkey:serverHost.PASSKEY, live:serverHost.LIVE ?? false,  serverConnection:undefined});
             //remotesPromises.push(connectServer(serverHost.HOST, serverHost.PASSKEY, app, serverHost.LIVE));
-            remotesPromises.push(ServerConnection.connect(serverHost.HOST, app, serverHost.PASSKEY, serverHost.LIVE, serverHost.REPLICA));
+            remotesPromises.push(ServerConnection.connect(serverHost.HOST, app, serverHost.PASSKEY, serverHost.LIVE, serverHost.REPLICA, serverHost.NAME));
         }
     }
     Promise.all(remotesPromises).then(()=>{
-        console.log('\x1b[32mGateway ready\x1b[0m');
+        if(serversConfig && serversConfig.length>0){
+            console.log('\x1b[32mGateway ready\x1b[0m');
+        }
+        if(gatewayConfig){
+            console.log('\x1b[32mNode ready\x1b[0m');
+        }
         resolve();
     }).catch(_error=>{
-        console.log('\x1b[32mGateway ready. \x1b[33mSome servers were not ready\x1b[0m');
+        if(serversConfig && serversConfig.length>0){
+            console.log('\x1b[32mGateway ready. \x1b[33mSome servers were not ready\x1b[0m');
+        }
+        if(gatewayConfig){
+            console.log('\x1b[32mGateway not connected\x1b[0m');
+        }
         resolve();
     })
+    events.on('ServerNotResponding', (hostName, name)=>{
+        manageServerNotResponding(hostName, name);
+    });
 })
 export const importModule = async (module:string) => {
     console.log(`\x1b[32mModule: \x1b[34m${module}\x1b[0m`);
-    const pathName = path.join(coreConfig.MODULES_PATH, module);
+    const pathName = path.join(config.MODULES_PATH || './', module);
     const moduleItem = require(pathName) as Module;
     let moduleConfig:ModuleConfig = {};
     if(moduleItem.init) await moduleItem.init();
@@ -336,7 +348,6 @@ export const addStaticRoute = (route:string, staticPath:string) => {
     staticServices.push({method:'use', path:staticPath});
 }
 export const invokeService = (ServiceName:string, request:ClientRequest, params?:GenericObject) => new Promise((resolve, reject)=>{
-    
     if(params) request.params = params;
 
     const Service = Services.get(ServiceName);
@@ -355,10 +366,10 @@ export const invokeService = (ServiceName:string, request:ClientRequest, params?
          * WHEN THE SERVICE IS NOT IN THE LOCAL DICTIONARY, AND THIS INSTANCE IS CONNECTED TO A GATEWAY 
          * THEN RETRIEVE SERVICE INFO FROM GATEWAY AND ADD THE SERVICE TO THE LOCAL DICTIONARY FOR FUTURE USE 
          **/
-        if(coreGatewayConfig){
+        if(gatewayConfig){
             ServerConnection.getGatewayService(ServiceName).then((serviceInfo)=>{
                 //CACHE THIS SERVICE
-                const serverHost = serviceInfo.server || coreGatewayConfig?.REMOTE_HOST;
+                const serverHost = serviceInfo.server || gatewayConfig?.REMOTE_HOST;
                 if(serverHost){
                     ServerConnection.remoteRequest(serverHost, ServiceName, request).then((remoteResponse)=>{
                         resolve(remoteResponse)
@@ -389,8 +400,7 @@ export const invokeService = (ServiceName:string, request:ClientRequest, params?
  * @returns response
  */
 const invokeLocalService = (Service:Service, request:ClientRequest) => new Promise<GenericObject>((resolve, reject)=>{
-
-    if(!Service.server){   
+    if(Service.server === undefined){
         if(Service.manager){
             Service.manager(request).then(response=>{
                 resolve(response); // TODO: Check This
@@ -401,37 +411,42 @@ const invokeLocalService = (Service:Service, request:ClientRequest) => new Promi
             resolve({});
         }
     }else{
-        if(coreGatewayConfig && Service.name){
-            
-            const serverHost = Service.server || coreGatewayConfig?.REMOTE_HOST;
-            if(serverHost){
-                ServerConnection.remoteRequest(serverHost, Service.name, request).then((remoteResponse)=>{
-                    resolve(remoteResponse)
-                }).catch((_error:any)=>{
-                    reject('invokeRemoteService error');
-                });
-            }
-        
+        if(Service.server === ''){
+            reject(responseError(504, `Remote server for service ${Service.name} is disconnected`));
         }else{
-            //It's a remote Service
-            const remoteServer = ServerConnection.remoteServers.get(Service.server);
-            if(remoteServer){
-                const serverConnection = remoteServer.serverConnection;
-                if(serverConnection && Service.name){
-                    serverConnection.invoke(Service.name, request, (feedback:GenericObject)=>{
-                        request.willResolve(feedback)
-                    }).then(remoteResponse=>{
+            if(gatewayConfig && Service.name){
+                
+                const serverHost = Service.server || gatewayConfig?.REMOTE_HOST;
+                if(serverHost){
+                    ServerConnection.remoteRequest(serverHost, Service.name, request).then((remoteResponse)=>{
                         resolve(remoteResponse)
-                    }).catch(error=>{
-                        reject(error)
+                    }).catch((_error:any)=>{
+                        reject('invokeRemoteService error');
                     });
-                }else{
-                    console.log(`invokeLocalService :: RemoteServer ${Service.server} has no ServerConnection made`);
-                    reject(`invokeLocalService :: RemoteServer ${Service.server} has no ServerConnection made`);
                 }
+            
             }else{
-                //TODO: This should not happen, but manage this error. Remote Server not found
-                reject(`invokeLocalService :: Server ${Service.server} not registered! `)
+                //It's a remote Service
+                const remoteServer = ServerConnection.remoteServers.get(Service.server);
+                if(remoteServer){
+                    const serverConnection = remoteServer.serverConnection;
+                    if(serverConnection && Service.name){
+                        serverConnection.invoke(Service.name, request, (feedback:GenericObject)=>{
+                            request.willResolve(feedback)
+                        }).then(remoteResponse=>{
+                            resolve(remoteResponse)
+                        }).catch(error=>{
+                            reject(responseError(505, error.message || error));
+                            //reject(error)
+                        });
+                    }else{
+                        console.log(`invokeLocalService :: RemoteServer ${Service.server} has no ServerConnection made`);
+                        reject(`invokeLocalService :: RemoteServer ${Service.server} has no ServerConnection made`);
+                    }
+                }else{
+                    //TODO: This should not happen, but manage this error. Remote Server not found
+                    reject(`invokeLocalService :: Server ${Service.server} not registered! `)
+                }
             }
         }
     }
@@ -595,7 +610,6 @@ const manageHttpRequest = async (req: Request, res:Response, Service:Service): P
 const invokeHttpService = (Service:InternalService, managedRequest:ClientRequest, responseManager: ResponseManager, res:Response, next: NextFunction) => {
     managedRequest.toGenericObject().then(managedRequestGO=>{
         events.emit('manageService', managedRequestGO, Service.name, Service.serviceType);
-   
         invokeLocalService(Service, managedRequest).then(response=>{
             let responseManaged:GenericObject|undefined = undefined;
             if(Service.server){
@@ -610,7 +624,6 @@ const invokeHttpService = (Service:InternalService, managedRequest:ClientRequest
         }).catch(error=>{
             //#region MANAGE ERROR
             events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
-            console.log('Error', error);
             if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
             if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, managedRequest.lang);
             if(!res.headersSent && next) next();
@@ -926,32 +939,47 @@ const manageRemoteRequest = (request:ClientRequest):Promise<Object> => new Promi
     }
 })
 const manageRemoteServer = (request:ClientRequest):Promise<Object> => new Promise((resolve, reject)=>{
-    const {localHost, passkey, handshake} = request.params;
+    const {localHost, passkey, handshake, autoAttachPasskey, live, replica, configName} = request.params;
     // ON  THE GATEWAY SIDE
     if(localHost && passkey){
-        //const server = coreServersConfig.find(server=>server.HOST == localHost)
+        //const server = serversConfig.find(server=>server.HOST == localHost)
         const serverConnection = ServerConnection.remoteServers.get(localHost);
         if(serverConnection){
+            serverConnection.live = serverConnection.live ?? live
+            serverConnection.name = configName;
             if(serverConnection?.passkey == passkey){
-                //connectServer(localHost, passkey, app, server?.LIVE ?? false);
                 ServerConnection.connect(localHost, app).then(()=>{
                     resolve({result:'ok'});
                 }).catch(error=>{
                     reject(error);
                 })
             }else{
-                reject({error:`invalid passkey for host ${localHost}`});
+                reject({code:403, message:`invalid passkey for host ${localHost}`});
             }
         }else{
-            reject({error:`host ${localHost} not allowed`});
+            if (autoAttachPasskey && config.GATEWAY_AUTO_ATTACH_PASSKEY && autoAttachPasskey === config.GATEWAY_AUTO_ATTACH_PASSKEY){
+                ServerConnection.remoteServers.set(localHost, {
+                    'live' : live,
+                    'replica' : replica,
+                    'passkey' : passkey
+                })
+                console.log('here 2');
+                ServerConnection.connect(localHost, app).then(()=>{
+                    resolve({result:'ok', autoAttached:true});
+                }).catch(error=>{
+                    reject(error);
+                })
+            }else{
+                reject({error:`host ${localHost} not allowed`});
+            }
         }
     }
     // ON THE SERVER SIDE
     if(handshake){
-        if(coreGatewayConfig){
+        if(gatewayConfig){
             console.log('\x1b[32mGATEWAY SUCCESSFULLY CONNECTED (HTTP)\x1b[0m');
-            if(coreGatewayConfig && handshake.passkey == coreGatewayConfig.PASSKEY && coreGatewayConfig?.REPLICA === true || handshake.replica === true){
-                ServerConnection.getServerReplica(coreGatewayConfig.REMOTE_HOST, app, handshake.dictionaryChangedEventName).then(()=>{
+            if(gatewayConfig && handshake.passkey == gatewayConfig.PASSKEY && gatewayConfig?.REPLICA === true || handshake.replica === true){
+                ServerConnection.getServerReplica(gatewayConfig.REMOTE_HOST, app, handshake.dictionaryChangedEventName).then(()=>{
                     console.log('\x1b[32mTHIS SERVER IS NOW A REPLICA\x1b[0m');
                     resolve({result:'replica'});
                 })
@@ -963,4 +991,13 @@ const manageRemoteServer = (request:ClientRequest):Promise<Object> => new Promis
         }
     }
 });
+const manageServerNotResponding = (hostName:string, name?:string) => {
+    console.log(`\x1b[31mServerNotResponding \x1b[34m${name || hostName}\x1b[0m`);
+    for (const service of Services.values()) {
+        if(service.server == hostName){
+            console.log(`\x1b[31m${service.name}\x1b[0m is down for host \x1b[34m${service.server}\x1b[0m`);
+            service.server = "";
+        }
+      }
+}
 export default startEngine;

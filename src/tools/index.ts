@@ -1,4 +1,5 @@
 
+import axios from "axios"
 import { GenericObject } from "../Types";
 
 export const parseCookie = (str:string): GenericObject =>
@@ -21,3 +22,31 @@ export const makeid = (length=10) => {
     }
     return result;
 }
+type fetchOptions = {
+    method?: string;
+    maxBodyLength?: number;
+    url?: string;
+    headers?: object;
+    data?: any;
+}
+export const fetch = (resource:string|fetchOptions, options?:fetchOptions) => new Promise((resolve, reject)=>{
+    var config: {
+        method?: string;
+        maxBodyLength?: number;
+        url?: string;
+        headers?: object;
+        data?: any;
+    } = {};
+
+    if(typeof resource == "string"){
+        config = options  ? {...options, url:resource} : {url:resource};
+    }else{
+        config = resource;
+    }
+
+    axios(config).then(function (response:any) {
+        resolve(response.data);
+    }).catch(function (error:any) {
+        reject(error);
+    });
+})
