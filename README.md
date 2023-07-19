@@ -10,32 +10,22 @@ touch index.ts
 ```
 
 ### Configuration
-Import __nemo3__ module, create an EngineConfig object and start the engine:
+Import __nemo3__ module, import process env object
 
 ```typescript
-import startEngine from 'nemo3';
-import path from 'path';
+import bootstrap from 'nemo';
+import 'dotenv/config'
 
-const config = {
-    "CONFIG_NAME" : "myModule",
-    "HTTP" : {
-        "PORT" : 3000
-    },
-    "HTTPS" : {
-        "PORT" : 4443,
-        "KEY_FILE" : path.join(__dirname, "./ssl/keyfile.key"),
-        "CERT_FILE" :path.join(__dirname, "./ssl/certfile.crt"),
-        "CA_FILE" : path.join(__dirname, "./ssl/cafile.csr"),
-        "PASSPHRASE" : "***certpassphrase***",
-        "CIPHERS" : "ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:ECDH+3DES:DH+3DES:RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS"
-    },
-    "MAX_BODY_SIZE" : "50mb",
-    "MODULES_PATH" : path.join(__dirname, "./modules"),
-    "MODULES":["myModule"]
-}
+bootstrap(process.env, __dirname);
 
-startEngine(config);
-
+```
+A __.env__ sample file could be:
+```
+CONFIG_NAME =  "Test"
+PORT = 3000
+MAX_BODY_SIZE = "50mb"
+MODULES_PATH = "./modules"
+MODULES = "myModule"
 ```
 For this sample, we are setting up a new module named __test__ on the app folder __/modules__, so we need to create the a new file in the path __/modules/myModule/index.ts__
 

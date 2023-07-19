@@ -15,12 +15,11 @@ import { RedisClientType } from 'redis';
 import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
-import { hostname } from 'os';
 
 export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, fetch};
 
-export const ServerVersion = '3.0.13';
-export const ServerBuildNumber = 16897248; // Date.parse('2023-07-18').valueOf()/100000
+export const ServerVersion = '3.0.14';
+export const ServerBuildNumber = 16898112; // Date.parse('2023-07-20').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -44,12 +43,17 @@ export var serversConfig:EngineServersConfig[] | undefined;
 
 var modules:Map<string, ModuleConfig> = new Map();
 
-const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], redisConfig?:string|boolean) => {
+const bootstrap = (envConfig:NodeJS.ProcessEnv, dirname:string) => {
+    const {config, gatewayConfig, serversConfig} = configureEngine(envConfig, dirname);
+
+    startEngine(config, gatewayConfig, serversConfig);
+}
+
+export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], redisConfig?:string|boolean) => {
     config = engineConfig;
     gatewayConfig = engineGatewayConfig;
     serversConfig = engineServersConfig;
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
-    console.clear();
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
     console.log(`\x1b[32m Config Name: \x1b[1m\x1b[34m${config.CONFIG_NAME} \x1b[0m`);
@@ -125,6 +129,69 @@ const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatew
             })
         })
     })
+}
+export const configureEngine = (envConfig:NodeJS.ProcessEnv, dirname:string) => {
+    var config = {
+        "CONFIG_NAME" : envConfig.CONFIG_NAME || "default",
+        "PORT" : envConfig.PORT ? Number.parseInt(envConfig.PORT, 10) : 3000,
+        "HTTPS_PORT" : envConfig.HTTPS_PORT ? Number.parseInt(envConfig.HTTPS_PORT, 10) : undefined,
+        "HTTPS_KEY_FILE" : envConfig.HTTPS_KEY_FILE,
+        "HTTPS_CERT_FILE" : envConfig.HTTPS_CERT_FILE,
+        "HTTPS_CA_FILE" : envConfig.HTTPS_CA_FILE,
+        "HTTPS_PASSPHRASE" : envConfig.HTTPS_PASSPHRASE,
+        "HTTPS_CIPHERS" : envConfig.HTTPS_CIPHERS,
+        "MAX_BODY_SIZE" : envConfig.MAX_BODY_SIZE || "2mb",
+        "MAX_HTTP_BUFFER_SIZE" : envConfig.MAX_HTTP_BUFFER_SIZE ? Number.parseInt(envConfig.MAX_HTTP_BUFFER_SIZE) : 100000000,
+        "MODULES_PATH" : envConfig.MODULES_PATH ? path.join(dirname, envConfig.MODULES_PATH) : "./modules",
+        "MODULES" : envConfig.MODULES ? envConfig.MODULES.split(',').map((item:string)=>item.trim()) : [],
+        "GATEWAY_KEEP_ALIVE_INTERVAL" : envConfig.GATEWAY_KEEP_ALIVE_INTERVAL ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_INTERVAL, 10) : 15000,
+        "GATEWAY_KEEP_ALIVE_RETRY_INTERVAL" : envConfig.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL, 10) : 5000,
+        "GATEWAY_KEEP_ALIVE_MAX_RETRIES" : envConfig.GATEWAY_KEEP_ALIVE_MAX_RETRIES ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_MAX_RETRIES, 10) : 3,
+        "GATEWAY_AUTO_ATTACH_PASSKEY" : envConfig.GATEWAY_AUTO_ATTACH_PASSKEY
+    }
+    
+    var gatewayConfig = undefined;
+    if (envConfig.REMOTE_HOST){ // CONNECT TO A GATEWAY
+        if(envConfig.REMOTE_HOST && envConfig.LOCAL_HOST && envConfig.PASSKEY){
+            gatewayConfig = {
+                REMOTE_HOST : envConfig.REMOTE_HOST,
+                LOCAL_HOST : envConfig.LOCAL_HOST,
+                PASSKEY : envConfig.PASSKEY,
+                REPLICA : envConfig.REPLICA ? (envConfig.REPLICA?.toLowerCase?.() === 'true') : false,
+                AUTO_ATTACH_PASSKEY : envConfig.AUTO_ATTACH_PASSKEY
+            }
+        }else{
+            gatewayConfig = undefined;
+            console.log('BAD GATEWAY CONFIGURATION');
+            console.log('REMOTE_HOST, LOCAL_HOST and PASSKEY are required');
+        }
+    }
+    
+    var serversConfig:EngineServersConfig[] = [];
+    
+    const addServerConfig = (index?:number) => {
+        if(index === undefined) index = 0;
+        const ServerHost = `SERVER_${index}_HOST`;
+        const ServerName = `SERVER_${index}_NAME`;
+        const ServerPasskey = `SERVER_${index}_PASSKEY`;
+        const ServerLive = `SERVER_${index}_LIVE`;
+        const ServerReplica = `SERVER_${index}_REPLICA`;
+        if(envConfig[ServerHost]){
+            if(envConfig[ServerHost] && envConfig[ServerPasskey]){
+                serversConfig.push({
+                    HOST : envConfig[ServerHost] ?? "",
+                    NAME : envConfig[ServerName] ?? "",
+                    PASSKEY : envConfig[ServerPasskey] ?? "",
+                    LIVE : envConfig[ServerLive] ? (envConfig[ServerLive]?.toLowerCase?.() === 'true') : false,
+                    REPLICA : envConfig[ServerReplica] ? (envConfig[ServerReplica]?.toLowerCase?.() === 'true') : false
+                })
+            }
+            addServerConfig(index+1);
+        }
+    }
+    
+    addServerConfig();
+    return ({config, gatewayConfig, serversConfig});
 }
 /**
  * LIVE CONNECTION ON THE RemoteServer SIDE
@@ -1000,4 +1067,4 @@ const manageServerNotResponding = (hostName:string, name?:string) => {
         }
       }
 }
-export default startEngine;
+export default bootstrap;
