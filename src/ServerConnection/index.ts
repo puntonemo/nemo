@@ -1,14 +1,18 @@
 import { io, Socket } from "socket.io-client";
 import * as socketioServer from 'socket.io';
 import { DefaultEventsMap } from "socket.io/dist/typed-events";
-import { GenericObject, Service, Services, staticServices, addService, RemoteServerConfig, ioServerOverHttp, ioServerOverHttps, coreGatewayConfig, events } from "..";
+import * as Core from "..";
 import ClientRequest from "../ClientRequest";
 import { makeid } from "../tools";
 import {Express} from 'express-serve-static-core';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 
 import axios from "axios";
-import { hostname } from "os";
+import { Server } from "http";
+
+const DEFAULT_GATEWAY_KEEP_ALIVE_MAX_RETRIES = 3;
+const DEFAULT_GATEWAY_KEEP_ALIVE_INTERVAL = 15000;
+const DEFAULT_GATEWAY_KEEP_ALIVE_RETRY_INTERVAL = 5000;
 
 type PromiseDefinition = {
     resolve : Function,
@@ -28,7 +32,7 @@ type RemoteServerDefinition = {
     replica:boolean
 }
 export default class ServerConnection{
-    public static remoteServers:Map<string,RemoteServerConfig> = new Map(); // FOR A GATEWAY, THOSE ARE ALL THE REMOTE SERVERS AVAILABLE
+    public static remoteServers:Map<string,Core.RemoteServerConfig> = new Map(); // FOR A GATEWAY, THOSE ARE ALL THE REMOTE SERVERS AVAILABLE
     public static gatewayServer:socketioServer.Socket[] = []; // FOR A REMOTE SERVER, IT'S THE CONNECTION(S) WITH THE GATEWAY
     private static _dictionaryChangedEventName?:string;
     private _connected:boolean = false;
@@ -44,15 +48,15 @@ export default class ServerConnection{
     public live = false;
     public replica = false;
     private _ping_retry = 1;
-    private _ping_max_retries = 3;
+    private _ping_max_retries = Core.config.GATEWAY_KEEP_ALIVE_MAX_RETRIES ?? DEFAULT_GATEWAY_KEEP_ALIVE_MAX_RETRIES;
     private _lag1 = 0;
     private _lag2 = 0;
     private _keepAliveTimer:NodeJS.Timer|undefined = undefined;
-    private _keepAliveInterval = 15000;
-    private _keepAliveRetryInterval = 5000;
+    private _keepAliveInterval = Core.config.GATEWAY_KEEP_ALIVE_INTERVAL ?? DEFAULT_GATEWAY_KEEP_ALIVE_INTERVAL;
+    private _keepAliveRetryInterval = Core.config.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL ?? DEFAULT_GATEWAY_KEEP_ALIVE_RETRY_INTERVAL;
     private _handshaked = false;
     
-    constructor(public hostName:string, public namespace:string, public options:Object, app:Express, passkey?:string, live?:boolean, replica?:boolean){
+    constructor(public hostName:string, public namespace:string, public options:Object, app:Express, passkey?:string, live?:boolean, replica?:boolean, public name?:string){
         const remoteServer = ServerConnection.remoteServers.get(hostName);
         if(remoteServer){
             remoteServer.serverConnection = this;
@@ -68,14 +72,16 @@ export default class ServerConnection{
     }
     connect(){
         return new Promise((resolve, reject)=>{
-            console.log(`\x1b[32mConnecting server \x1b[34m${this.hostName}\x1b[32m\x1b[0m`);
-            /* CONNECT VIA WS */
+            
+            
             if(this.live){
+                /* CONNECT VIA WS */
+                console.log(`Connecting \x1b[34m${this.name || this.hostName}\x1b[0m`);
                 this.liveConnection();
             }
             /* UPDATE LOCAL DICTIONARY WITH REMOTE DICTIONARY */
             this.getServerReplica().then((updates)=>{
-                if(ServerConnection._dictionaryChangedEventName) events.emit(ServerConnection._dictionaryChangedEventName, updates)
+                if(ServerConnection._dictionaryChangedEventName) Core.events.emit(ServerConnection._dictionaryChangedEventName, updates)
                 resolve(this);
             }).catch(error=>{
                 reject(error);
@@ -100,7 +106,7 @@ export default class ServerConnection{
             ServerConnection.request('POST', handshakeUrl, {'server-request':'true'}, {handshake}).then(_response=>{
                 this._handshaked = true;
             }).catch(error=>{
-                console.log('handshake error', error.message);
+                console.log(`\x1b[33mhandshake error ${error.message}\x1b[0m`);
                 this._handshaked = false;
             })
         }
@@ -110,16 +116,16 @@ export default class ServerConnection{
         const _ping = Date.now();
         ServerConnection.request('GET', pingUrl, {'server-request':'true'}).then(pong=>{
             that._lag1 = Date.now() - _ping;
-            that._lag2 = Date.now() - (pong as GenericObject).pong;
+            that._lag2 = Date.now() - (pong as Core.GenericObject).pong;
             that._ping_retry = 1;
-        }).catch(error=>{
-            console.log(`PING ERROR ${error.message} (${that._ping_retry} / ${that._ping_max_retries})`);
+        }).catch(_error=>{
+            console.log(`\x1b[33mPING Failed to \x1b[34m${that.name || that.hostName}\x1b[33m ${that._ping_retry} / ${that._ping_max_retries}\x1b[0m`);
             that._ping_retry++;
             if(that._ping_retry <= that._ping_max_retries){
                 setTimeout(that.ping, that._keepAliveRetryInterval, that);
             }else{
-                console.log('SERVER NOT RESPONDING');
                 clearInterval(that._keepAliveTimer);
+                Core.events.emit('ServerNotResponding', that.hostName, that.name);
                 that._keepAliveTimer = undefined;
             }
             
@@ -131,9 +137,8 @@ export default class ServerConnection{
     private liveConnection(){
         this._socket = io(`${this.hostName}/${this.namespace}`, this.options);
         this._socket.on('connect', ()=>{
-            console.log('Server Live Connected:', this.hostName);
+            console.log(`\x1b[34m${this.name || this.hostName}\x1b[0m is live \x1b[34m${this._socket?.id}\x1b[0m`);
             this._socket?.emit('handshake', this.hostName, this._passkey, this.replica, ServerConnection._dictionaryChangedEventName);
-            console.log('\x1b[32mhandshake sent to\x1b[0m', this._socket?.id);
             this._connected = true;
             if(this._keepAliveTimer){
                 clearInterval(this._keepAliveTimer);
@@ -148,8 +153,10 @@ export default class ServerConnection{
             */
         });
         this._socket.on('disconnect', ()=>{
-            console.log('Server Live DISCONNECTED:', this.hostName);
+            console.log(`\x1b[34m${this.name || this.hostName}\x1b[33m has been disconnected\x1b[0m`);
             this._connected = false;
+            this._socket?.disconnect();
+            this._socket = undefined;
             this.keepConnectionAlive();
         });
         this._socket.on('serverResponse', (tid, response)=>{
@@ -177,11 +184,11 @@ export default class ServerConnection{
             this._promises.delete(tid);
         });
         this._socket.on('clientMsg', (socketId, ev, ...args)=>{     
-            const socket = ioServerOverHttps.sockets.sockets.get(socketId) || ioServerOverHttp.sockets.sockets.get(socketId);
+            const socket = Core.ioServerOverHttps.sockets.sockets.get(socketId) || Core.ioServerOverHttp.sockets.sockets.get(socketId);
             if(socket) socket.emit(ev, ...args);
         })
         this._socket.on('clientWill', (socketId, ev, ...args)=>{     
-            const socket = ioServerOverHttps.sockets.sockets.get(socketId) || ioServerOverHttp.sockets.sockets.get(socketId);
+            const socket = Core.ioServerOverHttps.sockets.sockets.get(socketId) || Core.ioServerOverHttp.sockets.sockets.get(socketId);
             if(socket) socket.emit(ev, ...args);
         })
     }
@@ -215,7 +222,7 @@ export default class ServerConnection{
         });
     }
     public invoke(methodName:string, clientRequest:ClientRequest, feedback?:Function){
-        return new Promise<GenericObject> ((resolve, reject)=>{
+        return new Promise<Core.GenericObject> ((resolve, reject)=>{
             //const method = this._apiDict[methodName];
             //if(method){
                 if(this._connected && this._socket){
@@ -235,20 +242,20 @@ export default class ServerConnection{
         })
     }
     public static getServerReplica(hostName:string, app:Express, dictionaryChangedEventName?:string){
-        return new Promise<GenericObject> ((resolve, reject) => {
+        return new Promise<Core.GenericObject> ((resolve, reject) => {
             const dictionaryUrl = `${hostName}/api`;
-            let newServices:GenericObject = {};
+            let newServices:Core.GenericObject = {};
             let newStaticPaths:{
                 method: string;
                 path: string;
             }[] = [];
-            ServerConnection.request('get', dictionaryUrl, {'server-request':'true'}).then((response:GenericObject)=>{
+            ServerConnection.request('get', dictionaryUrl, {'server-request':'true'}).then((response:Core.GenericObject)=>{
                 if(response.remoteServers)  ServerConnection.registerRemoteServer(response.remoteServers);
                 if(response.dict) newServices = ServerConnection.updateLocalDictionary(response["dict"], app, hostName);
                 if(response.staticPaths) newStaticPaths = ServerConnection.proxyRemoteStaticPath(response.staticPaths, app, hostName);
                 
                 if(dictionaryChangedEventName){
-                    events.on(dictionaryChangedEventName, (updates)=>{
+                    Core.events.on(dictionaryChangedEventName, (updates)=>{
                         ServerConnection.gatewayDictionaryChanged(updates, app, hostName);
                     })
                 }
@@ -258,19 +265,19 @@ export default class ServerConnection{
             })
         })
     }
-    private static gatewayDictionaryChanged (updates:GenericObject, app:Express, hostName:string){
+    private static gatewayDictionaryChanged (updates:Core.GenericObject, app:Express, hostName:string){
         const {newServices, newStaticPaths} = updates;
         ServerConnection.updateLocalDictionary(newServices, app, hostName);
         ServerConnection.proxyRemoteStaticPath(newStaticPaths, app, hostName);
     }
-    private static updateLocalDictionary (methods:GenericObject, app:Express, hostName:string) {
+    private static updateLocalDictionary (methods:Core.GenericObject, app:Express, hostName:string) {
         /**
          * ADD REMOTE Services TO LOCAL DICTIONARY
          */
-        const newServices:GenericObject = {};
+        const newServices:Core.GenericObject = {};
         Object.keys(methods).forEach(remoteServiceName=>{
             const remoteServiceItem = methods[remoteServiceName];
-            let remoteService:Service = {
+            let remoteService:Core.Service = {
                 name: remoteServiceName,
                 parameters:remoteServiceItem.parameters,
                 serviceType:remoteServiceItem.serviceType,
@@ -288,12 +295,18 @@ export default class ServerConnection{
             if(remoteServiceItem.hasOwnProperty('proxy')) remoteService.proxy = remoteServiceItem.proxy;
             if(remoteService.serviceType != 'render'){
                 if(remoteService.name){
-                    const Service = Services.get(remoteService.name);
+                    const Service = Core.Services.get(remoteService.name);
                     if(Service){
-                        //Service already exists
-                        console.log(`Service \x1b[33m${Service.name}\x1b[0m already exists on this server`);
+                        if(Service.server===''){
+                            //Reattaching server to service;
+                            console.log(`\x1b[34m${Service.name}\x1b[0m reattached to server \x1b[34m${hostName}\x1b[0m`);
+                            Service.server = hostName;
+                        }else{
+                            //Service already exists
+                            console.log(`Service \x1b[33m${Service.name}\x1b[0m already exists on this server`);
+                        }
                     }else{
-                        addService(undefined, remoteService) // TODO HERE moduleName set to Undefined
+                        Core.addService(undefined, remoteService) // TODO HERE moduleName set to Undefined
                         Object.assign(newServices, Object.fromEntries(new Map([[remoteServiceName,remoteService]])))
                         //newServices.push(Object.fromEntries(new Map([[remoteServiceName,remoteService]])));
                         console.log(`Service \x1b[34m${remoteService.name}\x1b[0m added to this server`);
@@ -318,10 +331,10 @@ export default class ServerConnection{
             path: string;
         }[] = [];
         for(const route of staticPaths){
-            const staticPathExisting = staticServices.find(staticService=>staticService.path==route.path);
+            const staticPathExisting = Core.staticServices.find(staticService=>staticService.path==route.path);
             if(!staticPathExisting){
                 const staticPath = {method:route.method, path:route.path};
-                staticServices.push(staticPath);
+                Core.staticServices.push(staticPath);
                 newStaticPaths.push(staticPath);
                 switch(route.method){   
                     case 'get':
@@ -369,27 +382,27 @@ export default class ServerConnection{
             });
         });
     }
-    public static async requestServerConnection (remoteHost:string, localHost:string, passkey:string) {
+    public static async requestServerConnection (remoteHost:string, localHost:string, passkey:string, autoAttachPasskey?:string, live?:boolean, replica?:boolean) {
         const config = {
             method:'POST',
             maxBodyLength: Infinity,
             url : `${remoteHost}/api/server/remoteServer`,
-            data : {localHost, passkey}
+            data : {localHost, passkey, autoAttachPasskey, live, replica, configName:Core.config.CONFIG_NAME}
         };
     
-        axios(config).then(response => {
-            console.log(`\x1b[32mWaiting for a gateway connection ...\x1b[0m`, response.data);
+        axios(config).then(_response => {
+            console.log(`\x1b[34mGateway\x1b[0m handshaking`);
             return;
         }).catch(error => {
-            console.log('\x1b[30mError Requesting Server Connection\x1b[0m', error.message, error.code);
+            console.log('\x1b[30mError Requesting \x1b[34mGateway\x1b[30m Connection\x1b[0m', error?.response?.data);
             return;
         });
     }
-    public static  getGatewayService (fullServiceName:string):Promise<Service> {
+    public static getGatewayService (fullServiceName:string):Promise<Core.Service> {
         return new Promise((resolve, reject)=>{
-            const remoteHost = coreGatewayConfig?.REMOTE_HOST;
-            const localHost = coreGatewayConfig?.LOCAL_HOST;
-            const passkey = coreGatewayConfig?.PASSKEY;
+            const remoteHost = Core.gatewayConfig?.REMOTE_HOST;
+            const localHost = Core.gatewayConfig?.LOCAL_HOST;
+            const passkey = Core.gatewayConfig?.PASSKEY;
             if(remoteHost && localHost && passkey){
                 const config = {
                     method:'POST',
@@ -411,7 +424,7 @@ export default class ServerConnection{
         })
     }
     public static remoteRequest (hostName:string, methodName:string, clientRequest:ClientRequest) {
-        return new Promise<GenericObject> ((resolve, reject)=>{
+        return new Promise<Core.GenericObject> ((resolve, reject)=>{
             
             const httpMethod = 'POST';
             const httpUrl = `${hostName}/api/server/remoteRequest`;
@@ -422,7 +435,7 @@ export default class ServerConnection{
                     clientRequest: clientRequestObject
                 }
                 ServerConnection.request(httpMethod, httpUrl, {'server-request':'true'}, data).then(res => {
-                    const rr = res as GenericObject
+                    const rr = res as Core.GenericObject
                     if(rr.hasOwnProperty('remoteSetCookie')){
                         const remoteSetCookie = rr.remoteSetCookie;
                         for(const setCookie of remoteSetCookie){
@@ -444,7 +457,7 @@ export default class ServerConnection{
             })
         })
     };
-    public static connect = (hostName:string, app:Express, passkey?:string, live?:boolean, replica?:boolean):Promise<RemoteServerConfig> => new Promise((resolve, reject)=>{
+    public static connect = (hostName:string, app:Express, passkey?:string, live?:boolean, replica?:boolean, name?:string):Promise<Core.RemoteServerConfig> => new Promise((resolve, reject)=>{
         let remoteServer = ServerConnection.remoteServers.get(hostName);
         if(!remoteServer){
             if(!passkey){
@@ -454,7 +467,8 @@ export default class ServerConnection{
                 ServerConnection.remoteServers.set(hostName, {
                     passkey,
                     live:live ?? false,
-                    replica: replica ?? false
+                    replica: replica ?? false,
+                    name: name
                 })
                 remoteServer = ServerConnection.remoteServers.get(hostName);
             }
@@ -464,17 +478,19 @@ export default class ServerConnection{
         //    resolve(remoteServer);
         //}else{
             if(remoteServer){
-                remoteServer.serverConnection = new ServerConnection(hostName, 'servers', {transports: ['websocket']}, app, remoteServer.passkey, remoteServer.live, remoteServer.replica);
+                remoteServer.serverConnection = new ServerConnection(hostName, 'servers', {transports: ['websocket']}, app, remoteServer.passkey, remoteServer.live, remoteServer.replica, remoteServer.name);
                 remoteServer.serverConnection.connect().then(()=>{
-                    console.log(`\x1b[32mServer \x1b[34m${hostName}\x1b[32m connected successfully\x1b[0m`);
-                    
+                    console.log(`\x1b[34m${name||hostName}\x1b[0m connected successfully`);
                     if(remoteServer) {
                         if(!remoteServer.serverConnection?.live) remoteServer.serverConnection?.keepConnectionAlive();
                         resolve(remoteServer);
                     }
                 }).catch(error=>{
-                    console.log(`\x1b[32mError connecting server \x1b[34m${hostName}\x1b[32m : \x1b[33m${error.message}\x1b[0m`);
-                    if(remoteServer) remoteServer.serverConnection = undefined
+                    console.log(`Error connecting server \x1b[34m${name||hostName}\x1b[0m : \x1b[33m${error.message}\x1b[0m`);
+                    if(remoteServer){
+                        if(remoteServer.serverConnection && remoteServer.live) remoteServer.serverConnection?._socket?.disconnect();
+                        remoteServer.serverConnection = undefined
+                    }
                     reject(error);
                 })
             }else{

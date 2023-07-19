@@ -8,24 +8,24 @@ import fs from 'fs';
 import { EngineConfig } from '..';
 import { Server } from "socket.io";
 
-export const setHttp = (engineConfig:EngineConfig)  => {
+export const setHttp = (config:EngineConfig)  => {
     let httpsServer:https.Server|undefined = undefined;
     const expressApp = express();
     expressApp.disable('x-powered-by');
-    expressApp.use(bodyParser.json({ limit: engineConfig?.MAX_BODY_SIZE || "2mb" }));
-    expressApp.use(bodyParser.urlencoded({ limit: engineConfig.MAX_BODY_SIZE || "2mb", extended: true, parameterLimit: 50000 }))
+    expressApp.use(bodyParser.json({ limit: config?.MAX_BODY_SIZE || "2mb" }));
+    expressApp.use(bodyParser.urlencoded({ limit: config.MAX_BODY_SIZE || "2mb", extended: true, parameterLimit: 50000 }))
     expressApp.use(fileUpload({createParentPath: true}));
     expressApp.use(express.json());
 
-    if(engineConfig?.HTTPS){
+    if(config?.HTTPS_PORT){
         const optSsl = { 
-            key: fs.readFileSync(engineConfig.HTTPS?.KEY_FILE ?? ""), 
-            cert: fs.readFileSync(engineConfig.HTTPS?.CERT_FILE ?? ""),
-            ca: fs.readFileSync(engineConfig.HTTPS?.CA_FILE ?? ""),
-            passphrase: engineConfig.HTTPS?.PASSPHRASE,
+            key: config.HTTPS_KEY_FILE ? fs.readFileSync(config.HTTPS_KEY_FILE) : undefined,
+            cert: config.HTTPS_CERT_FILE ? fs.readFileSync(config.HTTPS_CERT_FILE) : undefined,
+            ca: config.HTTPS_CA_FILE ? fs.readFileSync(config.HTTPS_CA_FILE) : undefined,
+            passphrase: config.HTTPS_PASSPHRASE,
             requestCert: false,
             rejectUnauthorized: false,
-            ciphers: engineConfig.HTTPS?.CIPHERS
+            ciphers: config.HTTPS_CIPHERS
         }
         httpsServer = https.createServer(optSsl, expressApp);
     }
@@ -35,7 +35,7 @@ export const setHttp = (engineConfig:EngineConfig)  => {
     return {expressApp, httpServer, httpsServer};
 }
 
-export const setSocket = (httpServer:http.Server|https.Server, engineConfig:EngineConfig) => {
-    const io = new Server(httpServer, engineConfig?.MAX_HTTP_BUFFER_SIZE ? {maxHttpBufferSize: engineConfig?.MAX_HTTP_BUFFER_SIZE}:undefined); // 1e8
+export const setSocket = (httpServer:http.Server|https.Server, config:EngineConfig) => {
+    const io = new Server(httpServer, config?.MAX_HTTP_BUFFER_SIZE ? {maxHttpBufferSize: config?.MAX_HTTP_BUFFER_SIZE}:undefined); // 1e8
     return io;
 }
