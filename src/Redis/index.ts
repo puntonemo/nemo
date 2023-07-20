@@ -1,13 +1,13 @@
 import { createClient } from "redis";
-import { events } from '..'
+import { events, redisConfig } from '..'
 import crypto from 'crypto';
 import base64url from "base64url";
 
 const pubChannel ='platformEvents';
 
-export const initRedis = async (clientConfig:string|boolean) => {
+export const initRedis = async () => {
     const serverIdentity = randomIdentity(16);
-    const client = createClient(typeof clientConfig == 'string' ? {url:clientConfig} : undefined);
+    const client = createClient(typeof redisConfig?.HOST == 'string' ? {url:redisConfig?.HOST, password:redisConfig?.PASSWORD} : undefined);
     client.on('error', err => console.log('Redis Client Error', err));
     const subscriber = client.duplicate();
     subscriber.on('error', err => console.error(err));
@@ -27,6 +27,7 @@ export const initRedis = async (clientConfig:string|boolean) => {
         if(!__self){
             try{
                 const message = JSON.stringify({event, values, serverIdentity});
+                
                 client.publish(pubChannel, message).then(()=>{
                     //console.log('message pusblished', event, message);
                 }).catch(error=>{

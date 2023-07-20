@@ -29,7 +29,7 @@ type fetchOptions = {
     headers?: object;
     data?: any;
 }
-export const fetch = (resource:string|fetchOptions, options?:fetchOptions) => new Promise((resolve, reject)=>{
+export const fetch = (resource:string|fetchOptions, options?:fetchOptions):Promise<GenericObject> => new Promise((resolve, reject)=>{
     var config: {
         method?: string;
         maxBodyLength?: number;
@@ -45,7 +45,7 @@ export const fetch = (resource:string|fetchOptions, options?:fetchOptions) => ne
     }
 
     axios(config).then(function (response:any) {
-        resolve(response.data);
+        resolve(response.data as GenericObject);
     }).catch(function (error:any) {
         reject(error);
     });

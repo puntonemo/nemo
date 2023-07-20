@@ -172,23 +172,23 @@ export default class ServerConnection{
             this._promises.delete(tid);
         });
         this._socket.on('error', (tid, response)=>{
-            console.log('error', response);
             const promise = this._promises.get(tid);
             clearTimeout(promise?.timeout);
+            promise?.reject(response);
             this._promises.delete(tid);
         });
         this._socket.on('will', (tid, response)=>{
             const promise = this._promises.get(tid);
-            console.log('will', response);
+            console.log('will (do nothing)', response);
             clearTimeout(promise?.timeout);
-            this._promises.delete(tid);
+            //this._promises.delete(tid);
         });
         this._socket.on('clientMsg', (socketId, ev, ...args)=>{     
-            const socket = Core.ioServerOverHttps.sockets.sockets.get(socketId) || Core.ioServerOverHttp.sockets.sockets.get(socketId);
+            const socket = Core.ioServerOverHttps?.sockets?.sockets?.get(socketId) || Core.ioServerOverHttp?.sockets?.sockets?.get(socketId);
             if(socket) socket.emit(ev, ...args);
         })
-        this._socket.on('clientWill', (socketId, ev, ...args)=>{     
-            const socket = Core.ioServerOverHttps.sockets.sockets.get(socketId) || Core.ioServerOverHttp.sockets.sockets.get(socketId);
+        this._socket.on('clientWill', (socketId, ev, ...args)=>{
+            const socket = Core.ioServerOverHttps?.sockets?.sockets?.get(socketId) || Core.ioServerOverHttp?.sockets?.sockets?.get(socketId);
             if(socket) socket.emit(ev, ...args);
         })
     }
@@ -228,7 +228,9 @@ export default class ServerConnection{
                 if(this._connected && this._socket){
                     this.emit(methodName, clientRequest, feedback).then(response=>{
                         resolve(response)
-                    }).catch(error=>reject(error));
+                    }).catch(error=>{
+                        reject(error)
+                    });
                 }else{
                     ServerConnection.remoteRequest(this.hostName, methodName, clientRequest).then(response=>{
                         resolve(response);
@@ -293,6 +295,7 @@ export default class ServerConnection{
             if(remoteServiceItem.hasOwnProperty('all')) remoteService.all = remoteServiceItem.all;
             if(remoteServiceItem.hasOwnProperty('use')) remoteService.use = remoteServiceItem.use;
             if(remoteServiceItem.hasOwnProperty('proxy')) remoteService.proxy = remoteServiceItem.proxy;
+            
             if(remoteService.serviceType != 'render'){
                 if(remoteService.name){
                     const Service = Core.Services.get(remoteService.name);
