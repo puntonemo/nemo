@@ -10,7 +10,7 @@ export default class Session {
     private static _staticAdapter:ISessionAdapterStatic;
     private _adapter:ISessionAdapter;
     constructor (public id:string){
-        if(id.trim()!=""){
+        if(id && id.trim && id.trim()!=""){
             if(Session._adapterType == "memory"){
                 this._adapter = new MemoryAdapter(this);
             }else{

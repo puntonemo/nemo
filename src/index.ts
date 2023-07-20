@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -16,10 +16,10 @@ import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, fetch};
+export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, fetch};
 
-export const ServerVersion = '3.0.14';
-export const ServerBuildNumber = 16898112; // Date.parse('2023-07-20').valueOf()/100000
+export const ServerVersion = '3.0.15';
+export const ServerBuildNumber = 16898500; // Date.parse('2023-07-20').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -39,20 +39,22 @@ export var redisClientEnabled:boolean;
 export var config:EngineConfig;
 export var gatewayConfig:EngineGatewayConfig | undefined;
 export var serversConfig:EngineServersConfig[] | undefined;
+export var redisConfig:EngineRedisConfig | undefined;
 //export var coreProcessRoot = process.argv.length>0 ? process.argv[1].split('/').slice(0,-1).join('/') : process.env.PWD;
 
 var modules:Map<string, ModuleConfig> = new Map();
 
-const bootstrap = (envConfig:NodeJS.ProcessEnv, dirname:string) => {
-    const {config, gatewayConfig, serversConfig} = configureEngine(envConfig, dirname);
-
-    startEngine(config, gatewayConfig, serversConfig);
+const bootstrap = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
+    const {config, gatewayConfig, serversConfig, redisConfig} = configureEngine(processEnv, dirname);
+    
+    startEngine(config, gatewayConfig, serversConfig, redisConfig);
 }
 
-export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], redisConfig?:string|boolean) => {
+export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], engineRedisConfig?:EngineRedisConfig) => {
     config = engineConfig;
     gatewayConfig = engineGatewayConfig;
     serversConfig = engineServersConfig;
+    redisConfig = engineRedisConfig;
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
@@ -69,7 +71,7 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
     /**
      * REDIS CONNECTION
      */
-    startRedis(redisConfig).then(()=>{
+    startRedis().then(()=>{
         /**
          * LOAD MODULES
          */
@@ -130,35 +132,35 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
         })
     })
 }
-export const configureEngine = (envConfig:NodeJS.ProcessEnv, dirname:string) => {
+export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
     var config = {
-        "CONFIG_NAME" : envConfig.CONFIG_NAME || "default",
-        "PORT" : envConfig.PORT ? Number.parseInt(envConfig.PORT, 10) : 3000,
-        "HTTPS_PORT" : envConfig.HTTPS_PORT ? Number.parseInt(envConfig.HTTPS_PORT, 10) : undefined,
-        "HTTPS_KEY_FILE" : envConfig.HTTPS_KEY_FILE,
-        "HTTPS_CERT_FILE" : envConfig.HTTPS_CERT_FILE,
-        "HTTPS_CA_FILE" : envConfig.HTTPS_CA_FILE,
-        "HTTPS_PASSPHRASE" : envConfig.HTTPS_PASSPHRASE,
-        "HTTPS_CIPHERS" : envConfig.HTTPS_CIPHERS,
-        "MAX_BODY_SIZE" : envConfig.MAX_BODY_SIZE || "2mb",
-        "MAX_HTTP_BUFFER_SIZE" : envConfig.MAX_HTTP_BUFFER_SIZE ? Number.parseInt(envConfig.MAX_HTTP_BUFFER_SIZE) : 100000000,
-        "MODULES_PATH" : envConfig.MODULES_PATH ? path.join(dirname, envConfig.MODULES_PATH) : "./modules",
-        "MODULES" : envConfig.MODULES ? envConfig.MODULES.split(',').map((item:string)=>item.trim()) : [],
-        "GATEWAY_KEEP_ALIVE_INTERVAL" : envConfig.GATEWAY_KEEP_ALIVE_INTERVAL ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_INTERVAL, 10) : 15000,
-        "GATEWAY_KEEP_ALIVE_RETRY_INTERVAL" : envConfig.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL, 10) : 5000,
-        "GATEWAY_KEEP_ALIVE_MAX_RETRIES" : envConfig.GATEWAY_KEEP_ALIVE_MAX_RETRIES ? Number.parseInt(envConfig.GATEWAY_KEEP_ALIVE_MAX_RETRIES, 10) : 3,
-        "GATEWAY_AUTO_ATTACH_PASSKEY" : envConfig.GATEWAY_AUTO_ATTACH_PASSKEY
+        "CONFIG_NAME" : processEnv.CONFIG_NAME || "default",
+        "PORT" : processEnv.PORT ? Number.parseInt(processEnv.PORT, 10) : 3000,
+        "HTTPS_PORT" : processEnv.HTTPS_PORT ? Number.parseInt(processEnv.HTTPS_PORT, 10) : undefined,
+        "HTTPS_KEY_FILE" : processEnv.HTTPS_KEY_FILE ? path.join(dirname, processEnv.HTTPS_KEY_FILE) : undefined,
+        "HTTPS_CERT_FILE" : processEnv.HTTPS_CERT_FILE ? path.join(dirname, processEnv.HTTPS_CERT_FILE) : undefined,
+        "HTTPS_CA_FILE" : processEnv.HTTPS_CA_FILE ? path.join(dirname, processEnv.HTTPS_CA_FILE) : undefined,
+        "HTTPS_PASSPHRASE" : processEnv.HTTPS_PASSPHRASE,
+        "HTTPS_CIPHERS" : processEnv.HTTPS_CIPHERS,
+        "MAX_BODY_SIZE" : processEnv.MAX_BODY_SIZE || "2mb",
+        "MAX_HTTP_BUFFER_SIZE" : processEnv.MAX_HTTP_BUFFER_SIZE ? Number.parseInt(processEnv.MAX_HTTP_BUFFER_SIZE) : 100000000,
+        "MODULES_PATH" : processEnv.MODULES_PATH ? path.join(dirname, processEnv.MODULES_PATH) : "./modules",
+        "MODULES" : processEnv.MODULES ? processEnv.MODULES.split(',').map((item:string)=>item.trim()) : [],
+        "GATEWAY_KEEP_ALIVE_INTERVAL" : processEnv.GATEWAY_KEEP_ALIVE_INTERVAL ? Number.parseInt(processEnv.GATEWAY_KEEP_ALIVE_INTERVAL, 10) : 15000,
+        "GATEWAY_KEEP_ALIVE_RETRY_INTERVAL" : processEnv.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL ? Number.parseInt(processEnv.GATEWAY_KEEP_ALIVE_RETRY_INTERVAL, 10) : 5000,
+        "GATEWAY_KEEP_ALIVE_MAX_RETRIES" : processEnv.GATEWAY_KEEP_ALIVE_MAX_RETRIES ? Number.parseInt(processEnv.GATEWAY_KEEP_ALIVE_MAX_RETRIES, 10) : 3,
+        "GATEWAY_AUTO_ATTACH_PASSKEY" : processEnv.GATEWAY_AUTO_ATTACH_PASSKEY
     }
     
     var gatewayConfig = undefined;
-    if (envConfig.REMOTE_HOST){ // CONNECT TO A GATEWAY
-        if(envConfig.REMOTE_HOST && envConfig.LOCAL_HOST && envConfig.PASSKEY){
+    if (processEnv.REMOTE_HOST){ // CONNECT TO A GATEWAY
+        if(processEnv.REMOTE_HOST && processEnv.LOCAL_HOST && processEnv.PASSKEY){
             gatewayConfig = {
-                REMOTE_HOST : envConfig.REMOTE_HOST,
-                LOCAL_HOST : envConfig.LOCAL_HOST,
-                PASSKEY : envConfig.PASSKEY,
-                REPLICA : envConfig.REPLICA ? (envConfig.REPLICA?.toLowerCase?.() === 'true') : false,
-                AUTO_ATTACH_PASSKEY : envConfig.AUTO_ATTACH_PASSKEY
+                REMOTE_HOST : processEnv.REMOTE_HOST,
+                LOCAL_HOST : processEnv.LOCAL_HOST,
+                PASSKEY : processEnv.PASSKEY,
+                REPLICA : processEnv.REPLICA ? (processEnv.REPLICA?.toLowerCase?.() === 'true') : false,
+                AUTO_ATTACH_PASSKEY : processEnv.AUTO_ATTACH_PASSKEY
             }
         }else{
             gatewayConfig = undefined;
@@ -176,14 +178,14 @@ export const configureEngine = (envConfig:NodeJS.ProcessEnv, dirname:string) => 
         const ServerPasskey = `SERVER_${index}_PASSKEY`;
         const ServerLive = `SERVER_${index}_LIVE`;
         const ServerReplica = `SERVER_${index}_REPLICA`;
-        if(envConfig[ServerHost]){
-            if(envConfig[ServerHost] && envConfig[ServerPasskey]){
+        if(processEnv[ServerHost]){
+            if(processEnv[ServerHost] && processEnv[ServerPasskey]){
                 serversConfig.push({
-                    HOST : envConfig[ServerHost] ?? "",
-                    NAME : envConfig[ServerName] ?? "",
-                    PASSKEY : envConfig[ServerPasskey] ?? "",
-                    LIVE : envConfig[ServerLive] ? (envConfig[ServerLive]?.toLowerCase?.() === 'true') : false,
-                    REPLICA : envConfig[ServerReplica] ? (envConfig[ServerReplica]?.toLowerCase?.() === 'true') : false
+                    HOST : processEnv[ServerHost] ?? "",
+                    NAME : processEnv[ServerName] ?? "",
+                    PASSKEY : processEnv[ServerPasskey] ?? "",
+                    LIVE : processEnv[ServerLive] ? (processEnv[ServerLive]?.toLowerCase?.() === 'true') : false,
+                    REPLICA : processEnv[ServerReplica] ? (processEnv[ServerReplica]?.toLowerCase?.() === 'true') : false
                 })
             }
             addServerConfig(index+1);
@@ -191,7 +193,17 @@ export const configureEngine = (envConfig:NodeJS.ProcessEnv, dirname:string) => 
     }
     
     addServerConfig();
-    return ({config, gatewayConfig, serversConfig});
+
+
+    let redisConfig:EngineRedisConfig|undefined = undefined; 
+    if(processEnv.REDIS){
+        redisConfig = {
+            HOST: processEnv.REDIS?.toLowerCase?.() === 'true' ? true : processEnv.REDIS,
+            PASSWORD:processEnv.REDIS_PASSWORD
+        }
+    } 
+
+    return ({config, gatewayConfig, serversConfig, redisConfig});
 }
 /**
  * LIVE CONNECTION ON THE RemoteServer SIDE
@@ -235,7 +247,7 @@ const manageWSServerConnection = (socket:Socket) => {
 const manageWSClientConnection = (socket:Socket) => {
     const cookies = socket.handshake.headers.cookie ? parseCookie(socket.handshake.headers.cookie) : undefined;
     console.log('New connection (WS)', socket.id, socket.nsp.name);
-    events.emit('connection', socket, cookies);
+    events.emit('connection', socket.id, cookies);
     socket.on('request', (ServiceName, ServiceParams, tid) => {
         console.log(`You're requesting (1) ${ServiceName} via WS-API`, ServiceParams, tid);
 
@@ -245,9 +257,9 @@ const manageWSClientConnection = (socket:Socket) => {
         }
     });
 }
-const startRedis = (redisConfig?:string|boolean):Promise<void> => new Promise(resolve=>{
+const startRedis = ():Promise<void> => new Promise(resolve=>{
     if(redisConfig){
-        initRedis(redisConfig).then(client=>{
+        initRedis().then(client=>{
             redisClient = client as RedisClientType;
             redisClientEnabled = true;
             console.log('\x1b[32mREDIS \x1b[34mENABLED\x1b[0m');
@@ -322,6 +334,7 @@ export const importModule = async (module:string) => {
 
     if(moduleItem.Services){
         for (const Service of moduleItem.Services) {
+            
             if(Service.serviceType !== 'static') addService(module, Service);
             if(Service.serviceType === 'static') addStaticService(module, Service);
         }
@@ -342,7 +355,8 @@ export const addService = (moduleName:string | undefined, Service:Service) => {
 
     var serviceLabel = moduleName && Service.name ? `${moduleName}.${Service.name}` : Service.name;
     internalService.public = Service.public ?? true;
-    if (serviceLabel) Services.set(serviceLabel, internalService);
+    console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
+    Services.set(serviceLabel, internalService);
 
     if(['json','form','render'].includes(Service.serviceType)){
         if (Service.get) app.get(Service.get, (req, res, next) => manageHttpService(req, res, internalService, next));
@@ -494,6 +508,7 @@ const invokeLocalService = (Service:Service, request:ClientRequest) => new Promi
             
             }else{
                 //It's a remote Service
+
                 const remoteServer = ServerConnection.remoteServers.get(Service.server);
                 if(remoteServer){
                     const serverConnection = remoteServer.serverConnection;
@@ -503,8 +518,8 @@ const invokeLocalService = (Service:Service, request:ClientRequest) => new Promi
                         }).then(remoteResponse=>{
                             resolve(remoteResponse)
                         }).catch(error=>{
-                            reject(responseError(505, error.message || error));
-                            //reject(error)
+                            //reject(responseError(505, error.message || error));
+                            reject(error)
                         });
                     }else{
                         console.log(`invokeLocalService :: RemoteServer ${Service.server} has no ServerConnection made`);
@@ -558,7 +573,6 @@ export const responseError = (status:number, info?:Object | unknown, data?:Objec
  */
 const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
     const request = await manageHttpRequest(req, res, Service);
-
     const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
     const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
     

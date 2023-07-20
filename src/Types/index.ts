@@ -94,7 +94,10 @@ export type EngineGatewayConfig = {
     LIVE?:boolean,
     AUTO_ATTACH_PASSKEY? : string   
 }
-
+export type EngineRedisConfig = {
+    HOST:string | boolean,
+    PASSWORD?:string
+}
 export type RemoteServerConfig = {
     passkey:string,
     live:boolean,
