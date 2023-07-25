@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig, PolicyChecker} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -16,10 +16,10 @@ import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, fetch};
+export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, fetch};
 
-export const ServerVersion = '3.0.15';
-export const ServerBuildNumber = 16898500; // Date.parse('2023-07-20').valueOf()/100000
+export const ServerVersion = '3.0.16';
+export const ServerBuildNumber = 16902432; // Date.parse('2023-07-25').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -55,6 +55,10 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
     gatewayConfig = engineGatewayConfig;
     serversConfig = engineServersConfig;
     redisConfig = engineRedisConfig;
+    Object.seal(config);
+    Object.seal(gatewayConfig);
+    Object.seal(serversConfig);
+    Object.seal(redisConfig);
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
@@ -221,6 +225,10 @@ const manageWSServerConnection = (socket:Socket) => {
     });
     socket.on('disconnect', ()=>{
         console.log(`\x1b[34mGateway\x1b[33m disconnected\x1b[0m`);
+        const gatewayServerIndex = ServerConnection.gatewayServer.findIndex(gatewaySocket=>gatewaySocket.id == socket.id);
+        if(gatewayServerIndex != -1) {
+            ServerConnection.gatewayServer.splice(gatewayServerIndex, 1);
+        }
     })
     socket.on('handshake', (host, passkey, replica, dictionaryChangedEventName)=>{
         if(host==gatewayConfig?.LOCAL_HOST && passkey==gatewayConfig?.PASSKEY){
@@ -329,6 +337,7 @@ export const importModule = async (module:string) => {
     if(moduleItem.renderer) moduleConfig.renderer = moduleItem.renderer;
     if(moduleItem.requestManager) moduleConfig.requestManager = moduleItem.requestManager;
     if(moduleItem.responseManager) moduleConfig.responseManager = moduleItem.responseManager;
+    if(moduleItem.policy) moduleConfig.policy = moduleItem.policy;
 
     modules.set(module, moduleConfig);
 
@@ -355,7 +364,7 @@ export const addService = (moduleName:string | undefined, Service:Service) => {
 
     var serviceLabel = moduleName && Service.name ? `${moduleName}.${Service.name}` : Service.name;
     internalService.public = Service.public ?? true;
-    console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
+    //console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
     Services.set(serviceLabel, internalService);
 
     if(['json','form','render'].includes(Service.serviceType)){
@@ -573,25 +582,77 @@ export const responseError = (status:number, info?:Object | unknown, data?:Objec
  */
 const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
     const request = await manageHttpRequest(req, res, Service);
-    const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-    const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-    
-    const managedRequest = requestManager(request);
-    if(Service.requestCert && req){
 
-        getPeerCertificate(req).then((cert:Object)=>{
-            managedRequest.certificate = cert;
-            invokeHttpService(Service, managedRequest, responseManager, res, next);
-        }).catch((error:any)=>{
-            console.log('error getting certificate (https)', error);
-            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
-            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
-            managedRequest.toGenericObject().then(managedRequestGO=>{
-                events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
-            })
+    /** CHECK IF POLICIES APPLY. FIRST SERVER POLICIES, THEN MODULE POLICY AND SERVER POLICY */
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    //Promise.all(policyCheckers).then(policiesResult=>{
+    //  NOT WORKING! WTF!
+    //})
+    if(policyCheckers.length>0){
+        for(const policyChecker of policyCheckers){
+            try{
+                const policyResult = await policyChecker(request);
+                if(!policyResult){
+                    policyPass = false;
+                    break;
+                }
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+                break;
+            }
+        }
+    }
+    if(policyPass && Service.moduleName && modules.get(Service.moduleName)?.policy){
+        const modulePolicy = modules.get(Service.moduleName)?.policy;
+        if(modulePolicy){
+            try{
+                policyPass = await modulePolicy(request);
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+            }
+        }
+    }
+    if(policyPass && Service?.policy){
+        try{
+            policyPass = await Service.policy(request);
+        }catch(error){
+            policyPass = false;
+            policyError = error as GenericObject;
+        }
+    }
+    if(!policyPass){
+        request.toGenericObject().then(managedRequestGO=>{
+            const errorPolicyStatus = {...{status:401}, ...policyError}
+            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
+            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, Service.serviceType);
+            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, errorPolicyStatus);
+            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, errorPolicyStatus, request.lang);
+            if(!res.headersSent && next) next();
         })
     }else{
-        invokeHttpService(Service, managedRequest, responseManager, res, next);
+        const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
+        const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+        
+        const managedRequest = requestManager(request);
+        if(Service.requestCert && req){
+
+            getPeerCertificate(req).then((cert:Object)=>{
+                managedRequest.certificate = cert;
+                invokeHttpService(Service, managedRequest, responseManager, res, next);
+            }).catch((error:any)=>{
+                console.log('error getting certificate (https)', error);
+                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
+                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
+                managedRequest.toGenericObject().then(managedRequestGO=>{
+                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
+                })
+            })
+        }else{
+            invokeHttpService(Service, managedRequest, responseManager, res, next);
+        }
     }
 }
 /**
@@ -601,7 +662,7 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
  * @param Service Service
  * @returns request
  */
-const manageHttpRequest = async (req: Request, res:Response, Service:Service): Promise<ClientRequest> =>{
+const manageHttpRequest = async (req: Request, res:Response, Service:InternalService): Promise<ClientRequest> =>{
     let cookies = req.headers?.cookie ? parseCookie(req.headers.cookie) : undefined;
     let sessionId = cookies ? cookies[sessionIdParamName] : undefined;
     let deviceId = cookies ? cookies[deviceIdParamName] : '';
@@ -662,7 +723,7 @@ const manageHttpRequest = async (req: Request, res:Response, Service:Service): P
         //sessionId.setValue("id", sessionId);
         if(req.headers[sessionIdParamName]) sessionId = req.headers[sessionIdParamName];
     }
-    var clientRequest = new ClientRequest(req, session, Service.serviceType, {}, res);
+    var clientRequest = new ClientRequest(req, session, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType, {}, res);
     if(req.params){
         for (var [key, value1] of Object.entries(req.params)){
             clientRequest.params[key] = value1;
@@ -684,7 +745,7 @@ const manageHttpRequest = async (req: Request, res:Response, Service:Service): P
         }
     }
     clientRequest.toGenericObject().then(clientRequestGO=>{
-        events.emit('clientRequest', clientRequestGO, Service.name, Service.serviceType);
+        events.emit('clientRequest', clientRequestGO, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType);
     })
     return clientRequest;
 }
@@ -750,7 +811,7 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
         }
     }
 }
-const manageWSRequest = async (socket:Socket, Service:Service, ServiceParams:any, tid:string, serverRequest?:GenericObject) => {
+const manageWSRequest = async (socket:Socket, Service:InternalService, ServiceParams:any, tid:string, serverRequest?:GenericObject) => {
     let session:Session;
     if(!serverRequest){
         let cookies = socket.handshake.headers.cookie ? parseCookie(socket.handshake.headers.cookie) : undefined;
@@ -773,9 +834,9 @@ const manageWSRequest = async (socket:Socket, Service:Service, ServiceParams:any
     }else{
         session = await Session.get(serverRequest.session.id);
     }
-    var clientRequest = new ClientRequest(socket, session, Service.serviceType, ServiceParams, tid, serverRequest);
+    var clientRequest = new ClientRequest(socket, session, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType, ServiceParams, tid, serverRequest);
     clientRequest.toGenericObject().then(clientRequestGO=>{
-        events.emit('clientRequest', clientRequestGO, Service.name, Service.serviceType);
+        events.emit('clientRequest', clientRequestGO, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType);
     })
     return clientRequest;
     
@@ -821,11 +882,11 @@ const remoteResponseManager = (response:GenericObject, clientRequest:ClientReque
  * @param res Express Response object
  * @param response Service response
  */
-const resolveJsonServiceDefault = (success:boolean,res:Response, response:GenericObject)=>{
+const resolveJsonServiceDefault = (success:boolean,res:Response, response:GenericObject, status?:number)=>{
     if(success){
-        if(!res.headersSent) res.status(200).send(response);
+        if(!res.headersSent) res.status(response.status || status || 200).send(response);
     }else{
-        if(!res.headersSent) res.status(500).send(response);
+        if(!res.headersSent) res.status(response.status || status || 500).send(response);
     }
 }
 const resolveRenderServiceDefault = (Service:InternalService, res:Response, response:GenericObject, lang?:string|string[])=>{
@@ -993,6 +1054,7 @@ const manageRemoteRequest = (request:ClientRequest):Promise<Object> => new Promi
         if(Service){
             const proxiedClientRequest = new ClientRequest(
                 request.req as Request, clientRequest.session.id,
+                Service.name,
                 Service.serviceType, 
                 clientRequest.params, 
                 request.res, 
@@ -1081,4 +1143,8 @@ const manageServerNotResponding = (hostName:string, name?:string) => {
         }
       }
 }
+export const addPolicy = (policyChecker:PolicyChecker) => {
+    policyCheckers.push(policyChecker);
+}
+let policyCheckers:PolicyChecker[] = [];
 export default bootstrap;

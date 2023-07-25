@@ -29,6 +29,7 @@ export default class ClientRequest {
     constructor(
         invokator: Request | Socket,
         session: Core.Session | string | undefined,
+        public serviceName: string | undefined,
         public type: ManagerType,
         public params: GenericObject,
         responseReference ?: Response | string,

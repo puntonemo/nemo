@@ -8,6 +8,7 @@ export type Renderer = (response:GenericObject, lang:string|string[]|undefined) 
 export type Manager = (request: ClientRequest) => Promise<Object>;
 export type RequestManager = (request:ClientRequest) => ClientRequest;
 export type ResponseManager = (response:GenericObject, request:ClientRequest, res?:Response) => GenericObject|undefined;
+export type PolicyChecker = (request:ClientRequest) => boolean | Promise<boolean>;
 
 export { ClientRequest };
 
@@ -15,13 +16,15 @@ export type Module = {
     init: Function
     Services:Service[],
     renderer: (response:GenericObject, lang:string|string[]|undefined) => string | undefined,
-    requestManager?: (request:ClientRequest) => ClientRequest,
+    requestManager?: RequestManager,
     responseManager?: ResponseManager
+    policy?:PolicyChecker
 }
 export type ModuleConfig = {
     renderer?: (response:GenericObject, lang:string|string[]|undefined) => string | undefined
-    requestManager?: (request:ClientRequest) => ClientRequest
+    requestManager?: RequestManager
     responseManager?: ResponseManager
+    policy?:PolicyChecker
 }
 export type GenericObject = {[k: string]: any};
 
@@ -59,7 +62,8 @@ export type Service = {
     proxy?: ServiceProxyOptions,    // Proxy Options. 'target' is required
     proxyContext?:string            // Proxy Context. default is the same service path
     excludeFromReplicas?:boolean,   // Exclude this service from remote replicas
-    serviceState?:ServiceState 
+    serviceState?:ServiceState,     // Stateless / Statefull
+    policy?:PolicyChecker           // Service Policy Checker
 }
 export type EngineConfig = {
     CONFIG_NAME:string,
