@@ -1,8 +1,8 @@
 {
   "name": "nemo3",
-  "version": "3.0.15",
+  "version": "3.0.16",
   "homepage": "https://puntonemo.com",
-  "main": "index.ts",
+  "main": "src/index.ts",
   "devDependencies": {
     "@types/base64url": "^2.0.0",
     "@types/body-parser": "^1.19.2",

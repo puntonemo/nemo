@@ -18,8 +18,8 @@ import { Server } from "socket.io";
 
 export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, fetch};
 
-export const ServerVersion = '3.0.16';
-export const ServerBuildNumber = 16902432; // Date.parse('2023-07-25').valueOf()/100000
+export const ServerVersion = '3.0.16.1';
+export const ServerBuildNumber = 16902500; // Date.parse('2023-07-25').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -627,7 +627,7 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
         request.toGenericObject().then(managedRequestGO=>{
             const errorPolicyStatus = {...{status:401}, ...policyError}
             console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
-            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, Service.serviceType);
+            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
             if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, errorPolicyStatus);
             if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, errorPolicyStatus, request.lang);
             if(!res.headersSent && next) next();
@@ -647,7 +647,7 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
                 if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
                 if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
                 managedRequest.toGenericObject().then(managedRequestGO=>{
-                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
+                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
                 })
             })
         }else{
@@ -783,31 +783,81 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
 
     const request = await manageWSRequest(socket, Service, ServiceParams ?? {}, tid, serverRequest);
 
-    //if(!isServerRequest){
-        const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-        const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-    //}
-    
-    if(request){      
-        const managedRequest = requestManager(request);
+    /** CHECK IF POLICIES APPLY. FIRST SERVER POLICIES, THEN MODULE POLICY AND SERVER POLICY */
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    //Promise.all(policyCheckers).then(policiesResult=>{
+    //  NOT WORKING! WTF!
+    //})
+    if(policyCheckers.length>0){
+        for(const policyChecker of policyCheckers){
+            try{
+                const policyResult = await policyChecker(request);
+                if(!policyResult){
+                    policyPass = false;
+                    break;
+                }
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+                break;
+            }
+        }
+    }
+    if(policyPass && Service.moduleName && modules.get(Service.moduleName)?.policy){
+        const modulePolicy = modules.get(Service.moduleName)?.policy;
+        if(modulePolicy){
+            try{
+                policyPass = await modulePolicy(request);
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+            }
+        }
+    }
+    if(policyPass && Service?.policy){
+        try{
+            policyPass = await Service.policy(request);
+        }catch(error){
+            policyPass = false;
+            policyError = error as GenericObject;
+        }
+    }
+    if(!policyPass){
+        request.toGenericObject().then(managedRequestGO=>{
+            const errorPolicyStatus = {...{status:401}, ...policyError}
+            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
+            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
+            socket.emit('error', tid, errorPolicyStatus);
+            
+        })
+    }else{
+        //if(!isServerRequest){
+            const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
+            const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+        //}
+        
+        if(request){      
+            const managedRequest = requestManager(request);
 
-        if(Service.requestCert && socket.request){
-            const req = socket.request as Request;
-            
-            managedRequest.willResolve({status:'renegotiating'});
-            getPeerCertificate(req).then((cert:Object)=>{
-                managedRequest.certificate = cert;
-                invokeWSService(Service, managedRequest, responseManager, socket, tid);
-            }).catch(error=>{
-                console.log('error getting certificate (wss)', error);
-                socket.emit('error', tid, error);
-                managedRequest.toGenericObject().then(managedRequestGO=>{
-                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
+            if(Service.requestCert && socket.request){
+                const req = socket.request as Request;
+                
+                managedRequest.willResolve({status:'renegotiating'});
+                getPeerCertificate(req).then((cert:Object)=>{
+                    managedRequest.certificate = cert;
+                    invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                }).catch(error=>{
+                    console.log('error getting certificate (wss)', error);
+                    socket.emit('error', tid, error);
+                    managedRequest.toGenericObject().then(managedRequestGO=>{
+                        events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                    })
                 })
-            })
-            
-        }else{
-            invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                
+            }else{
+                invokeWSService(Service, managedRequest, responseManager, socket, tid);
+            }
         }
     }
 }
@@ -884,9 +934,9 @@ const remoteResponseManager = (response:GenericObject, clientRequest:ClientReque
  */
 const resolveJsonServiceDefault = (success:boolean,res:Response, response:GenericObject, status?:number)=>{
     if(success){
-        if(!res.headersSent) res.status(response.status || status || 200).send(response);
+        if(!res.headersSent) res.status(!isNaN(parseInt(response.status)) && !isNaN(response.status) ? Number.parseInt(response.status) : status || 200).send(response);
     }else{
-        if(!res.headersSent) res.status(response.status || status || 500).send(response);
+        if(!res.headersSent) res.status(!isNaN(parseInt(response.status)) && !isNaN(response.status) ? Number.parseInt(response.status) : status || 500).send(response);
     }
 }
 const resolveRenderServiceDefault = (Service:InternalService, res:Response, response:GenericObject, lang?:string|string[])=>{
