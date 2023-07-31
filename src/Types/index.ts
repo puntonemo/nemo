@@ -2,6 +2,7 @@ import ClientRequest from '../ClientRequest';
 import ServerConnection from '../ServerConnection';
 import { Request, Response } from 'express';
 import { Socket } from 'socket.io';
+import * as http from 'http';
 
 export type ServiceState = "stateful" | "stateless"
 export type Renderer = (response:GenericObject, lang:string|string[]|undefined) => string | undefined;
@@ -9,7 +10,8 @@ export type Manager = (request: ClientRequest) => Promise<Object>;
 export type RequestManager = (request:ClientRequest) => ClientRequest;
 export type ResponseManager = (response:GenericObject, request:ClientRequest, res?:Response) => GenericObject|undefined;
 export type PolicyChecker = (request:ClientRequest) => boolean | Promise<boolean>;
-
+export type httpClientRequest = http.ClientRequest;
+export type httpServerResponse = http.ServerResponse;
 export { ClientRequest };
 
 export type Module = {
@@ -38,7 +40,9 @@ export type ServiceProxyOptions = {
     pathFilter?:string|string[]|((path:string, req:Request)=>boolean),
     target:string,
     pathRewrite?:boolean|{[k: string]: string}|((path:string, req:Request)=>string),
-    router?:()=>string|{protocol:"http:"|"https:", host:string, port:number}
+    router?:()=>string|{protocol:"http:"|"https:", host:string, port:number},
+    onProxyReq?: (proxyReq: httpClientRequest, req:Request, res: Response) => void;
+    onProxyRes?: (proxyRes: httpServerResponse, req:Request, res: Response) => any;
 }
 
 export type Service = {

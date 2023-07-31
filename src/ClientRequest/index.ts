@@ -161,9 +161,13 @@ export default class ClientRequest {
         })
     }
     private emitToGateways(sev:string, socketId:string, ev:string, ...args:unknown[]){
-        ServerConnection.gatewayServer.forEach(gatewayServer=>{
-            gatewayServer.emit(sev, socketId, ev, ...args)
-        })
+        if(ServerConnection.gatewayServer.length>0){
+            ServerConnection.gatewayServer.forEach(gatewayServer=>{
+                gatewayServer.emit(sev, socketId, ev, ...args)
+            })
+        }else{
+            Core.events.emit('serverEmitToClient', sev, socketId, ev, ...args);
+        }
     }
     get session() {
         return this._session;

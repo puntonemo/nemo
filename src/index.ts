@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig, PolicyChecker} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig, PolicyChecker, httpClientRequest} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -16,10 +16,11 @@ import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, fetch};
+export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, httpClientRequest, fetch};
 
-export const ServerVersion = '3.0.16.1';
-export const ServerBuildNumber = 16902500; // Date.parse('2023-07-25').valueOf()/100000
+
+export const ServerVersion = '3.0.18';
+export const ServerBuildNumber = 16907616; // Date.parse('2023-07-31').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -322,12 +323,20 @@ const startRemotes = ():Promise<void> => new Promise(resolve=>{
         if(gatewayConfig){
             console.log('\x1b[32mGateway not connected\x1b[0m');
         }
+        ListenRemoteEvents();
         resolve();
     })
     events.on('ServerNotResponding', (hostName, name)=>{
         manageServerNotResponding(hostName, name);
     });
-})
+});
+const ListenRemoteEvents = () => {
+    events.on('serverEmitToClient', (_sev, socketId, ev, ...args)=>{
+        const socket = ioServerOverHttps?.sockets?.sockets?.get(socketId) || ioServerOverHttp?.sockets?.sockets?.get(socketId);
+        if(socket) socket.emit(ev, ...args);
+    })
+    console.log('\x1b[32mListening to remote events\x1b[0m');
+}
 export const importModule = async (module:string) => {
     console.log(`\x1b[32mModule: \x1b[34m${module}\x1b[0m`);
     const pathName = path.join(config.MODULES_PATH || './', module);
@@ -355,46 +364,73 @@ export const importModule = async (module:string) => {
  * @param Service Service definition
  */
 export const addService = (moduleName:string | undefined, Service:Service) => {
-    var internalService:InternalService = {...Service, ...{moduleName}};
-    if(!Service.name){
-        Service.name = `service${Date.now()}`;
-        Service.public = false;
+    let internalService:InternalService = {...Service, ...{moduleName}};
+    if(!internalService.name){
+        internalService.name = makeid(16);
+        internalService.public = false;
     }
-    if(!Service.serviceState) Service.serviceState = defaultServiceState;
+    if(!Service.serviceState) internalService.serviceState = defaultServiceState;
 
-    var serviceLabel = moduleName && Service.name ? `${moduleName}.${Service.name}` : Service.name;
+    let serviceLabel = moduleName && internalService.name ? `${moduleName}.${internalService.name}` : internalService.name;
     internalService.public = Service.public ?? true;
     //console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
     Services.set(serviceLabel, internalService);
 
-    if(['json','form','render'].includes(Service.serviceType)){
-        if (Service.get) app.get(Service.get, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.post) app.post(Service.post, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.put) app.put(Service.put, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.delete) app.delete(Service.delete, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.all) app.all(Service.all, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.use) app.use(Service.use, (req, res, next) => manageHttpService(req, res, internalService, next));
+    if(['json','form','render'].includes(internalService.serviceType)){
+        if (internalService.get) app.get(internalService.get, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.post) app.post(internalService.post, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.put) app.put(internalService.put, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.delete) app.delete(internalService.delete, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.all) app.all(internalService.all, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.use) app.use(internalService.use, (req, res, next) => manageHttpService(req, res, internalService, next));
     }
-    if (Service.serviceType == 'proxy'){
-        if(!Service.proxy) throw "proxy services requires 'proxy' attributes";
+    if (internalService.serviceType == 'proxy'){
+        if(!internalService.proxy) throw "proxy services requires 'proxy' attributes";
         let method:string = "use";
-        if (Service.get) method = "get";
-        if (Service.post) method = "post";
-        if (Service.put) method = "put";
-        if (Service.delete) method = "delete";
-        if (Service.all) method = "all";
-        if (Service.use) method = "use";
-        const path = (Service as GenericObject)[method];
-        const context = Service.proxyContext || (Service as GenericObject)[method];
-        if(!Service?.proxy?.pathRewrite) Service.proxy.pathRewrite = true;
-        if(!Service?.proxy?.changeOrigin) Service.proxy.changeOrigin = true;
-        if(Service?.proxy?.pathRewrite === true){
+        if (internalService.get) method = "get";
+        if (internalService.post) method = "post";
+        if (internalService.put) method = "put";
+        if (internalService.delete) method = "delete";
+        if (internalService.all) method = "all";
+        if (internalService.use) method = "use";
+        const path = (internalService as GenericObject)[method];
+        const context = internalService.proxyContext || (internalService as GenericObject)[method];
+        if(!internalService?.proxy?.pathRewrite) internalService.proxy.pathRewrite = true;
+        if(!internalService?.proxy?.changeOrigin) internalService.proxy.changeOrigin = true;
+        if(internalService?.proxy?.pathRewrite === true){
             const pathRewriteLabel = `^${path}`
             const pathRewrite:GenericObject = {}
             pathRewrite[pathRewriteLabel] = '';
-            Service.proxy.pathRewrite = pathRewrite
+            internalService.proxy.pathRewrite = pathRewrite   
         }
-        const proxy = createProxyMiddleware(context, Service.proxy as GenericObject);
+        const ServiceProxy:GenericObject = {...internalService.proxy};
+        ServiceProxy.onProxyReq = async (proxyReq:httpClientRequest, req:Request, res:Response) => {
+            if(internalService?.proxy?.onProxyReq){
+                try{
+                    internalService.proxy.onProxyReq(proxyReq, req, res);
+                }catch(error){
+                    const onProxyReqError = error as GenericObject;
+                    res.status(!isNaN(parseInt(onProxyReqError.status)) && !isNaN(onProxyReqError.status) ? Number.parseInt(onProxyReqError.status) : 500).send(onProxyReqError);
+                    return;
+                }
+            }
+            
+            const request = await manageHttpRequest(req, res, internalService);
+            // add custom header to request
+            let policyPass = true;
+            let policyError:GenericObject|undefined = undefined;
+            try{
+                policyPass = await checkServicePolicyPass(request, internalService);
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+                res.status(!isNaN(parseInt(policyError.status)) && !isNaN(policyError.status) ? Number.parseInt(policyError.status) : 500).send(policyError);
+                return;
+            }
+        }
+
+        const proxy = createProxyMiddleware(context, ServiceProxy);
+        
         switch(method){
             case "get":
                 app.get(path, proxy);
@@ -573,16 +609,7 @@ export const responseError = (status:number, info?:Object | unknown, data?:Objec
     }
     return response;
 }
-/**
- * 
- * @param req Express Request
- * @param res Express Response
- * @param Service Service
- * @param next Next Function
- */
-const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
-    const request = await manageHttpRequest(req, res, Service);
-
+const checkServicePolicyPass = async (request:ClientRequest, Service:InternalService):Promise<boolean> => {
     /** CHECK IF POLICIES APPLY. FIRST SERVER POLICIES, THEN MODULE POLICY AND SERVER POLICY */
     let policyPass = true;
     let policyError:GenericObject|undefined = undefined;
@@ -622,6 +649,27 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
             policyPass = false;
             policyError = error as GenericObject;
         }
+    }
+    if(!policyPass) throw policyError;
+    return policyPass;
+}
+/**
+ * 
+ * @param req Express Request
+ * @param res Express Response
+ * @param Service Service
+ * @param next Next Function
+ */
+const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
+    const request = await manageHttpRequest(req, res, Service);
+
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    try{
+        policyPass = await checkServicePolicyPass(request, Service)
+    }catch(error){
+        policyPass = false;
+        policyError = error as GenericObject;
     }
     if(!policyPass){
         request.toGenericObject().then(managedRequestGO=>{
@@ -783,46 +831,15 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
 
     const request = await manageWSRequest(socket, Service, ServiceParams ?? {}, tid, serverRequest);
 
-    /** CHECK IF POLICIES APPLY. FIRST SERVER POLICIES, THEN MODULE POLICY AND SERVER POLICY */
     let policyPass = true;
     let policyError:GenericObject|undefined = undefined;
-    //Promise.all(policyCheckers).then(policiesResult=>{
-    //  NOT WORKING! WTF!
-    //})
-    if(policyCheckers.length>0){
-        for(const policyChecker of policyCheckers){
-            try{
-                const policyResult = await policyChecker(request);
-                if(!policyResult){
-                    policyPass = false;
-                    break;
-                }
-            }catch(error){
-                policyPass = false;
-                policyError = error as GenericObject;
-                break;
-            }
-        }
+    try{
+        policyPass = await checkServicePolicyPass(request, Service)
+    }catch(error){
+        policyPass = false;
+        policyError = error as GenericObject;
     }
-    if(policyPass && Service.moduleName && modules.get(Service.moduleName)?.policy){
-        const modulePolicy = modules.get(Service.moduleName)?.policy;
-        if(modulePolicy){
-            try{
-                policyPass = await modulePolicy(request);
-            }catch(error){
-                policyPass = false;
-                policyError = error as GenericObject;
-            }
-        }
-    }
-    if(policyPass && Service?.policy){
-        try{
-            policyPass = await Service.policy(request);
-        }catch(error){
-            policyPass = false;
-            policyError = error as GenericObject;
-        }
-    }
+
     if(!policyPass){
         request.toGenericObject().then(managedRequestGO=>{
             const errorPolicyStatus = {...{status:401}, ...policyError}
