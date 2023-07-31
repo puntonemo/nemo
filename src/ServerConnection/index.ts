@@ -8,7 +8,6 @@ import {Express} from 'express-serve-static-core';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 
 import axios from "axios";
-import { Server } from "http";
 
 const DEFAULT_GATEWAY_KEEP_ALIVE_MAX_RETRIES = 3;
 const DEFAULT_GATEWAY_KEEP_ALIVE_INTERVAL = 15000;
@@ -35,7 +34,7 @@ export default class ServerConnection{
     public static remoteServers:Map<string,Core.RemoteServerConfig> = new Map(); // FOR A GATEWAY, THOSE ARE ALL THE REMOTE SERVERS AVAILABLE
     public static gatewayServer:socketioServer.Socket[] = []; // FOR A REMOTE SERVER, IT'S THE CONNECTION(S) WITH THE GATEWAY
     private static _dictionaryChangedEventName?:string;
-    private _connected:boolean = false;
+    private _connected:boolean|string = false;
     private _socket:Socket<DefaultEventsMap, DefaultEventsMap> | undefined;
     //private _api:GenericObject={};
     //private _apiDict:GenericObject={};
@@ -70,7 +69,7 @@ export default class ServerConnection{
         if(!ServerConnection._dictionaryChangedEventName) ServerConnection._dictionaryChangedEventName = `dictionaryChangedEventName${makeid(10)}`;
         this._app = app;
     }
-    connect(){
+    private connect(){
         return new Promise((resolve, reject)=>{
             
             
@@ -131,6 +130,22 @@ export default class ServerConnection{
             
         })
     }
+    
+    public get connected() : boolean|string {
+        return this._connected;
+    }
+    public get lag1() : number {
+        return this._lag1
+    }
+    public get lag2() : number {
+        return this._lag2
+    }
+    public get lag() : number {
+        return Math.round((this._lag1 + this._lag2) / 2);
+    }
+    public get handshaked() : boolean {
+        return this._handshaked;
+    }
     /**
      * CONNECTION ON THE GATEWAY SIDE
      */
@@ -139,7 +154,7 @@ export default class ServerConnection{
         this._socket.on('connect', ()=>{
             console.log(`\x1b[34m${this.name || this.hostName}\x1b[0m is live \x1b[34m${this._socket?.id}\x1b[0m`);
             this._socket?.emit('handshake', this.hostName, this._passkey, this.replica, ServerConnection._dictionaryChangedEventName);
-            this._connected = true;
+            this._connected = this._socket?.id ?? false;
             if(this._keepAliveTimer){
                 clearInterval(this._keepAliveTimer);
                 this._keepAliveTimer = undefined;
@@ -195,7 +210,6 @@ export default class ServerConnection{
     private getServerReplica(){
         return ServerConnection.getServerReplica(this.hostName, this._app);
     }
-
     private timeoutRequest (tid:string) {
         console.log('Request timeout %o', tid);
         const response504 = {   

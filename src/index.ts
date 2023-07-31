@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig, PolicyChecker, httpClientRequest} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -16,10 +16,11 @@ import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, fetch};
+export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, httpClientRequest, fetch};
 
-export const ServerVersion = '3.0.15';
-export const ServerBuildNumber = 16898500; // Date.parse('2023-07-20').valueOf()/100000
+
+export const ServerVersion = '3.0.18';
+export const ServerBuildNumber = 16907616; // Date.parse('2023-07-31').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -55,6 +56,10 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
     gatewayConfig = engineGatewayConfig;
     serversConfig = engineServersConfig;
     redisConfig = engineRedisConfig;
+    Object.seal(config);
+    Object.seal(gatewayConfig);
+    Object.seal(serversConfig);
+    Object.seal(redisConfig);
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
@@ -221,6 +226,10 @@ const manageWSServerConnection = (socket:Socket) => {
     });
     socket.on('disconnect', ()=>{
         console.log(`\x1b[34mGateway\x1b[33m disconnected\x1b[0m`);
+        const gatewayServerIndex = ServerConnection.gatewayServer.findIndex(gatewaySocket=>gatewaySocket.id == socket.id);
+        if(gatewayServerIndex != -1) {
+            ServerConnection.gatewayServer.splice(gatewayServerIndex, 1);
+        }
     })
     socket.on('handshake', (host, passkey, replica, dictionaryChangedEventName)=>{
         if(host==gatewayConfig?.LOCAL_HOST && passkey==gatewayConfig?.PASSKEY){
@@ -314,12 +323,20 @@ const startRemotes = ():Promise<void> => new Promise(resolve=>{
         if(gatewayConfig){
             console.log('\x1b[32mGateway not connected\x1b[0m');
         }
+        ListenRemoteEvents();
         resolve();
     })
     events.on('ServerNotResponding', (hostName, name)=>{
         manageServerNotResponding(hostName, name);
     });
-})
+});
+const ListenRemoteEvents = () => {
+    events.on('serverEmitToClient', (_sev, socketId, ev, ...args)=>{
+        const socket = ioServerOverHttps?.sockets?.sockets?.get(socketId) || ioServerOverHttp?.sockets?.sockets?.get(socketId);
+        if(socket) socket.emit(ev, ...args);
+    })
+    console.log('\x1b[32mListening to remote events\x1b[0m');
+}
 export const importModule = async (module:string) => {
     console.log(`\x1b[32mModule: \x1b[34m${module}\x1b[0m`);
     const pathName = path.join(config.MODULES_PATH || './', module);
@@ -329,6 +346,7 @@ export const importModule = async (module:string) => {
     if(moduleItem.renderer) moduleConfig.renderer = moduleItem.renderer;
     if(moduleItem.requestManager) moduleConfig.requestManager = moduleItem.requestManager;
     if(moduleItem.responseManager) moduleConfig.responseManager = moduleItem.responseManager;
+    if(moduleItem.policy) moduleConfig.policy = moduleItem.policy;
 
     modules.set(module, moduleConfig);
 
@@ -346,46 +364,73 @@ export const importModule = async (module:string) => {
  * @param Service Service definition
  */
 export const addService = (moduleName:string | undefined, Service:Service) => {
-    var internalService:InternalService = {...Service, ...{moduleName}};
-    if(!Service.name){
-        Service.name = `service${Date.now()}`;
-        Service.public = false;
+    let internalService:InternalService = {...Service, ...{moduleName}};
+    if(!internalService.name){
+        internalService.name = makeid(16);
+        internalService.public = false;
     }
-    if(!Service.serviceState) Service.serviceState = defaultServiceState;
+    if(!Service.serviceState) internalService.serviceState = defaultServiceState;
 
-    var serviceLabel = moduleName && Service.name ? `${moduleName}.${Service.name}` : Service.name;
+    let serviceLabel = moduleName && internalService.name ? `${moduleName}.${internalService.name}` : internalService.name;
     internalService.public = Service.public ?? true;
-    console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
+    //console.log(`Adding service ${internalService.serviceType} ${serviceLabel} - ${internalService.public ? 'public' : 'private'} - ${internalService.excludeFromReplicas ? 'excluded from replica' : 'replicable'}`,);
     Services.set(serviceLabel, internalService);
 
-    if(['json','form','render'].includes(Service.serviceType)){
-        if (Service.get) app.get(Service.get, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.post) app.post(Service.post, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.put) app.put(Service.put, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.delete) app.delete(Service.delete, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.all) app.all(Service.all, (req, res, next) => manageHttpService(req, res, internalService, next));
-        if (Service.use) app.use(Service.use, (req, res, next) => manageHttpService(req, res, internalService, next));
+    if(['json','form','render'].includes(internalService.serviceType)){
+        if (internalService.get) app.get(internalService.get, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.post) app.post(internalService.post, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.put) app.put(internalService.put, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.delete) app.delete(internalService.delete, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.all) app.all(internalService.all, (req, res, next) => manageHttpService(req, res, internalService, next));
+        if (internalService.use) app.use(internalService.use, (req, res, next) => manageHttpService(req, res, internalService, next));
     }
-    if (Service.serviceType == 'proxy'){
-        if(!Service.proxy) throw "proxy services requires 'proxy' attributes";
+    if (internalService.serviceType == 'proxy'){
+        if(!internalService.proxy) throw "proxy services requires 'proxy' attributes";
         let method:string = "use";
-        if (Service.get) method = "get";
-        if (Service.post) method = "post";
-        if (Service.put) method = "put";
-        if (Service.delete) method = "delete";
-        if (Service.all) method = "all";
-        if (Service.use) method = "use";
-        const path = (Service as GenericObject)[method];
-        const context = Service.proxyContext || (Service as GenericObject)[method];
-        if(!Service?.proxy?.pathRewrite) Service.proxy.pathRewrite = true;
-        if(!Service?.proxy?.changeOrigin) Service.proxy.changeOrigin = true;
-        if(Service?.proxy?.pathRewrite === true){
+        if (internalService.get) method = "get";
+        if (internalService.post) method = "post";
+        if (internalService.put) method = "put";
+        if (internalService.delete) method = "delete";
+        if (internalService.all) method = "all";
+        if (internalService.use) method = "use";
+        const path = (internalService as GenericObject)[method];
+        const context = internalService.proxyContext || (internalService as GenericObject)[method];
+        if(!internalService?.proxy?.pathRewrite) internalService.proxy.pathRewrite = true;
+        if(!internalService?.proxy?.changeOrigin) internalService.proxy.changeOrigin = true;
+        if(internalService?.proxy?.pathRewrite === true){
             const pathRewriteLabel = `^${path}`
             const pathRewrite:GenericObject = {}
             pathRewrite[pathRewriteLabel] = '';
-            Service.proxy.pathRewrite = pathRewrite
+            internalService.proxy.pathRewrite = pathRewrite   
         }
-        const proxy = createProxyMiddleware(context, Service.proxy as GenericObject);
+        const ServiceProxy:GenericObject = {...internalService.proxy};
+        ServiceProxy.onProxyReq = async (proxyReq:httpClientRequest, req:Request, res:Response) => {
+            if(internalService?.proxy?.onProxyReq){
+                try{
+                    internalService.proxy.onProxyReq(proxyReq, req, res);
+                }catch(error){
+                    const onProxyReqError = error as GenericObject;
+                    res.status(!isNaN(parseInt(onProxyReqError.status)) && !isNaN(onProxyReqError.status) ? Number.parseInt(onProxyReqError.status) : 500).send(onProxyReqError);
+                    return;
+                }
+            }
+            
+            const request = await manageHttpRequest(req, res, internalService);
+            // add custom header to request
+            let policyPass = true;
+            let policyError:GenericObject|undefined = undefined;
+            try{
+                policyPass = await checkServicePolicyPass(request, internalService);
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+                res.status(!isNaN(parseInt(policyError.status)) && !isNaN(policyError.status) ? Number.parseInt(policyError.status) : 500).send(policyError);
+                return;
+            }
+        }
+
+        const proxy = createProxyMiddleware(context, ServiceProxy);
+        
         switch(method){
             case "get":
                 app.get(path, proxy);
@@ -564,6 +609,50 @@ export const responseError = (status:number, info?:Object | unknown, data?:Objec
     }
     return response;
 }
+const checkServicePolicyPass = async (request:ClientRequest, Service:InternalService):Promise<boolean> => {
+    /** CHECK IF POLICIES APPLY. FIRST SERVER POLICIES, THEN MODULE POLICY AND SERVER POLICY */
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    //Promise.all(policyCheckers).then(policiesResult=>{
+    //  NOT WORKING! WTF!
+    //})
+    if(policyCheckers.length>0){
+        for(const policyChecker of policyCheckers){
+            try{
+                const policyResult = await policyChecker(request);
+                if(!policyResult){
+                    policyPass = false;
+                    break;
+                }
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+                break;
+            }
+        }
+    }
+    if(policyPass && Service.moduleName && modules.get(Service.moduleName)?.policy){
+        const modulePolicy = modules.get(Service.moduleName)?.policy;
+        if(modulePolicy){
+            try{
+                policyPass = await modulePolicy(request);
+            }catch(error){
+                policyPass = false;
+                policyError = error as GenericObject;
+            }
+        }
+    }
+    if(policyPass && Service?.policy){
+        try{
+            policyPass = await Service.policy(request);
+        }catch(error){
+            policyPass = false;
+            policyError = error as GenericObject;
+        }
+    }
+    if(!policyPass) throw policyError;
+    return policyPass;
+}
 /**
  * 
  * @param req Express Request
@@ -573,25 +662,45 @@ export const responseError = (status:number, info?:Object | unknown, data?:Objec
  */
 const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
     const request = await manageHttpRequest(req, res, Service);
-    const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-    const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-    
-    const managedRequest = requestManager(request);
-    if(Service.requestCert && req){
 
-        getPeerCertificate(req).then((cert:Object)=>{
-            managedRequest.certificate = cert;
-            invokeHttpService(Service, managedRequest, responseManager, res, next);
-        }).catch((error:any)=>{
-            console.log('error getting certificate (https)', error);
-            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
-            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
-            managedRequest.toGenericObject().then(managedRequestGO=>{
-                events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
-            })
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    try{
+        policyPass = await checkServicePolicyPass(request, Service)
+    }catch(error){
+        policyPass = false;
+        policyError = error as GenericObject;
+    }
+    if(!policyPass){
+        request.toGenericObject().then(managedRequestGO=>{
+            const errorPolicyStatus = {...{status:401}, ...policyError}
+            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
+            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
+            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, errorPolicyStatus);
+            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, errorPolicyStatus, request.lang);
+            if(!res.headersSent && next) next();
         })
     }else{
-        invokeHttpService(Service, managedRequest, responseManager, res, next);
+        const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
+        const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+        
+        const managedRequest = requestManager(request);
+        if(Service.requestCert && req){
+
+            getPeerCertificate(req).then((cert:Object)=>{
+                managedRequest.certificate = cert;
+                invokeHttpService(Service, managedRequest, responseManager, res, next);
+            }).catch((error:any)=>{
+                console.log('error getting certificate (https)', error);
+                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
+                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
+                managedRequest.toGenericObject().then(managedRequestGO=>{
+                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                })
+            })
+        }else{
+            invokeHttpService(Service, managedRequest, responseManager, res, next);
+        }
     }
 }
 /**
@@ -601,7 +710,7 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
  * @param Service Service
  * @returns request
  */
-const manageHttpRequest = async (req: Request, res:Response, Service:Service): Promise<ClientRequest> =>{
+const manageHttpRequest = async (req: Request, res:Response, Service:InternalService): Promise<ClientRequest> =>{
     let cookies = req.headers?.cookie ? parseCookie(req.headers.cookie) : undefined;
     let sessionId = cookies ? cookies[sessionIdParamName] : undefined;
     let deviceId = cookies ? cookies[deviceIdParamName] : '';
@@ -662,7 +771,7 @@ const manageHttpRequest = async (req: Request, res:Response, Service:Service): P
         //sessionId.setValue("id", sessionId);
         if(req.headers[sessionIdParamName]) sessionId = req.headers[sessionIdParamName];
     }
-    var clientRequest = new ClientRequest(req, session, Service.serviceType, {}, res);
+    var clientRequest = new ClientRequest(req, session, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType, {}, res);
     if(req.params){
         for (var [key, value1] of Object.entries(req.params)){
             clientRequest.params[key] = value1;
@@ -684,7 +793,7 @@ const manageHttpRequest = async (req: Request, res:Response, Service:Service): P
         }
     }
     clientRequest.toGenericObject().then(clientRequestGO=>{
-        events.emit('clientRequest', clientRequestGO, Service.name, Service.serviceType);
+        events.emit('clientRequest', clientRequestGO, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType);
     })
     return clientRequest;
 }
@@ -722,35 +831,54 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
 
     const request = await manageWSRequest(socket, Service, ServiceParams ?? {}, tid, serverRequest);
 
-    //if(!isServerRequest){
-        const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-        const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-    //}
-    
-    if(request){      
-        const managedRequest = requestManager(request);
+    let policyPass = true;
+    let policyError:GenericObject|undefined = undefined;
+    try{
+        policyPass = await checkServicePolicyPass(request, Service)
+    }catch(error){
+        policyPass = false;
+        policyError = error as GenericObject;
+    }
 
-        if(Service.requestCert && socket.request){
-            const req = socket.request as Request;
+    if(!policyPass){
+        request.toGenericObject().then(managedRequestGO=>{
+            const errorPolicyStatus = {...{status:401}, ...policyError}
+            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
+            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
+            socket.emit('error', tid, errorPolicyStatus);
             
-            managedRequest.willResolve({status:'renegotiating'});
-            getPeerCertificate(req).then((cert:Object)=>{
-                managedRequest.certificate = cert;
-                invokeWSService(Service, managedRequest, responseManager, socket, tid);
-            }).catch(error=>{
-                console.log('error getting certificate (wss)', error);
-                socket.emit('error', tid, error);
-                managedRequest.toGenericObject().then(managedRequestGO=>{
-                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, Service.serviceType);
+        })
+    }else{
+        //if(!isServerRequest){
+            const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
+            const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+        //}
+        
+        if(request){      
+            const managedRequest = requestManager(request);
+
+            if(Service.requestCert && socket.request){
+                const req = socket.request as Request;
+                
+                managedRequest.willResolve({status:'renegotiating'});
+                getPeerCertificate(req).then((cert:Object)=>{
+                    managedRequest.certificate = cert;
+                    invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                }).catch(error=>{
+                    console.log('error getting certificate (wss)', error);
+                    socket.emit('error', tid, error);
+                    managedRequest.toGenericObject().then(managedRequestGO=>{
+                        events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                    })
                 })
-            })
-            
-        }else{
-            invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                
+            }else{
+                invokeWSService(Service, managedRequest, responseManager, socket, tid);
+            }
         }
     }
 }
-const manageWSRequest = async (socket:Socket, Service:Service, ServiceParams:any, tid:string, serverRequest?:GenericObject) => {
+const manageWSRequest = async (socket:Socket, Service:InternalService, ServiceParams:any, tid:string, serverRequest?:GenericObject) => {
     let session:Session;
     if(!serverRequest){
         let cookies = socket.handshake.headers.cookie ? parseCookie(socket.handshake.headers.cookie) : undefined;
@@ -773,9 +901,9 @@ const manageWSRequest = async (socket:Socket, Service:Service, ServiceParams:any
     }else{
         session = await Session.get(serverRequest.session.id);
     }
-    var clientRequest = new ClientRequest(socket, session, Service.serviceType, ServiceParams, tid, serverRequest);
+    var clientRequest = new ClientRequest(socket, session, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType, ServiceParams, tid, serverRequest);
     clientRequest.toGenericObject().then(clientRequestGO=>{
-        events.emit('clientRequest', clientRequestGO, Service.name, Service.serviceType);
+        events.emit('clientRequest', clientRequestGO, `${Service.moduleName?Service.moduleName + "." : ""}${Service.name}`, Service.serviceType);
     })
     return clientRequest;
     
@@ -821,11 +949,11 @@ const remoteResponseManager = (response:GenericObject, clientRequest:ClientReque
  * @param res Express Response object
  * @param response Service response
  */
-const resolveJsonServiceDefault = (success:boolean,res:Response, response:GenericObject)=>{
+const resolveJsonServiceDefault = (success:boolean,res:Response, response:GenericObject, status?:number)=>{
     if(success){
-        if(!res.headersSent) res.status(200).send(response);
+        if(!res.headersSent) res.status(!isNaN(parseInt(response.status)) && !isNaN(response.status) ? Number.parseInt(response.status) : status || 200).send(response);
     }else{
-        if(!res.headersSent) res.status(500).send(response);
+        if(!res.headersSent) res.status(!isNaN(parseInt(response.status)) && !isNaN(response.status) ? Number.parseInt(response.status) : status || 500).send(response);
     }
 }
 const resolveRenderServiceDefault = (Service:InternalService, res:Response, response:GenericObject, lang?:string|string[])=>{
@@ -993,6 +1121,7 @@ const manageRemoteRequest = (request:ClientRequest):Promise<Object> => new Promi
         if(Service){
             const proxiedClientRequest = new ClientRequest(
                 request.req as Request, clientRequest.session.id,
+                Service.name,
                 Service.serviceType, 
                 clientRequest.params, 
                 request.res, 
@@ -1081,4 +1210,8 @@ const manageServerNotResponding = (hostName:string, name?:string) => {
         }
       }
 }
+export const addPolicy = (policyChecker:PolicyChecker) => {
+    policyCheckers.push(policyChecker);
+}
+let policyCheckers:PolicyChecker[] = [];
 export default bootstrap;
