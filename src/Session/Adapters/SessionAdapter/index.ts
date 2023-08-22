@@ -1,10 +1,11 @@
 import Session from "../..";
 import { GenericObject, SessionValue } from "../../../Types";
 
-export interface ISessionAdapterStatic {
+export interface ISessionAdapter {
     get(sessionId:string): Promise<Session>,
+    getAdapter(session:Session): ISessionInstanceAdapter
 }
-export abstract class ISessionAdapter {
+export abstract class ISessionInstanceAdapter {
     constructor(protected session:Session){
     }
     toJSON (_key:string){
@@ -15,7 +16,7 @@ export abstract class ISessionAdapter {
     abstract delValue (key:string):Promise<void>;
     abstract toGenericObject() : Promise<GenericObject>;
 }
-export class EmptyAdapter extends ISessionAdapter{
+export class EmptyAdapter extends ISessionInstanceAdapter{
     private _session:GenericObject;
     constructor(session:Session){
         super(session);
@@ -46,18 +47,31 @@ export class EmptyAdapter extends ISessionAdapter{
     }
 }
 /*
-Implement XXX adapter:
+How to implement an XXX adapter with DB Connection:
 
-import Session from "../..";
-import { GenericObject, SessionValue } from "../../../../types";
-import { ISessionAdapterStatic, ISessionAdapter } from "../SessionAdapter";
+import { Session, ISessionAdapterStatic, ISessionAdapter, GenericObject, SessionValue } from "../../..";
 
-export const StaticXXXAdapter:ISessionAdapterStatic = {
+interface ISessionAdapterConnection {
+    setAdapter (mongoClient:MongoClient, dbName:string,  collectionName:string):void;
+}
+
+export const StaticXXXAdapter:ISessionAdapterStatic & ISessionAdapterConnection  = {
     async get(sessionId:string): Promise<Session> {
         throw `not implemented for ${sessionId}`;
+    },
+    getAdapter(session:Session) {
+        return new XXXAdapter(session);
+    },
+    async setAdapter(mongoClient, dbName, collectionName) {
+        try {
+            // do some async operations (DB Conections, ...)
+        } catch (error) {
+            // Catch error
+        }
+        Session.setAdapter(this);
     }
 }
-export class XXXAdapter extends ISessionAdapter{
+class XXXAdapter extends ISessionAdapter{
     constructor(session:Session){
         super(session);
         ...

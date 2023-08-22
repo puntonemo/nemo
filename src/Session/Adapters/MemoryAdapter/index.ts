@@ -1,10 +1,9 @@
-import Session from "../..";
-import { GenericObject, SessionValue } from "../../../Types";
-import { ISessionAdapterStatic, ISessionAdapter } from "../SessionAdapter";
+import { Session, GenericObject, SessionValue } from "../../..";
+import { ISessionAdapter, ISessionInstanceAdapter} from "../SessionAdapter"
 
 var sessions:Map<string, GenericObject> = new Map();
 
-export const StaticMemoryAdapter:ISessionAdapterStatic = {
+const SessionAdapter:ISessionAdapter = {
     async get(sessionId:string): Promise<Session> {
         let session = sessions.get(sessionId);
         if(!session){
@@ -18,9 +17,12 @@ export const StaticMemoryAdapter:ISessionAdapterStatic = {
         }else{
             return new Session(sessionId);
         }
+    },
+    getAdapter(session:Session) {
+        return new SessionInstanceAdapter(session);
     }
 }
-export class MemoryAdapter extends ISessionAdapter{
+class SessionInstanceAdapter extends ISessionInstanceAdapter{
     private _session:GenericObject;
     constructor(session:Session){
         super(session);
@@ -35,6 +37,7 @@ export class MemoryAdapter extends ISessionAdapter{
     override setValue (key:string, value:SessionValue):Promise<void>{
         return new Promise(resolve=>{
             this._session[key] = value;
+            this. _session.updateTimeStamp = Date.now();
             resolve()
         })
     }
@@ -50,3 +53,4 @@ export class MemoryAdapter extends ISessionAdapter{
         })
     }
 }
+export default SessionAdapter;

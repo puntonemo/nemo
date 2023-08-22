@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, EngineRedisConfig, PolicyChecker, httpClientRequest} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, PolicyChecker, httpClientRequest, SessionValue} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -9,18 +9,18 @@ import * as ExpressCore from 'express-serve-static-core';
 import { getPeerCertificate } from './Renegotiate'
 import { setHttp, setSocket } from './setHttp';
 import EventEmitter2 from 'eventemitter2';
-import { initRedis } from './Redis';
 import Session from './Session';
 import { RedisClientType } from 'redis';
 import ServerConnection from './ServerConnection';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { Server } from "socket.io";
+import crypto from 'crypto';
+import base64url from "base64url";
+import { ISessionInstanceAdapter, ISessionAdapter } from './Session/Adapters/SessionAdapter';
+export { Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServerConnection, PolicyChecker, httpClientRequest, SessionValue, ISessionInstanceAdapter, ISessionAdapter, fetch, crypto, base64url};
 
-export {Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, EngineRedisConfig, ServerConnection, PolicyChecker, httpClientRequest, fetch};
-
-
-export const ServerVersion = '3.0.18';
-export const ServerBuildNumber = 16907616; // Date.parse('2023-07-31').valueOf()/100000
+export const ServerVersion = '3.0.19.1';
+export const ServerBuildNumber = 16926624; // Date.parse('2023-08-22').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -40,26 +40,23 @@ export var redisClientEnabled:boolean;
 export var config:EngineConfig;
 export var gatewayConfig:EngineGatewayConfig | undefined;
 export var serversConfig:EngineServersConfig[] | undefined;
-export var redisConfig:EngineRedisConfig | undefined;
 //export var coreProcessRoot = process.argv.length>0 ? process.argv[1].split('/').slice(0,-1).join('/') : process.env.PWD;
 
 var modules:Map<string, ModuleConfig> = new Map();
 
 const bootstrap = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
-    const {config, gatewayConfig, serversConfig, redisConfig} = configureEngine(processEnv, dirname);
+    const {config, gatewayConfig, serversConfig} = configureEngine(processEnv, dirname);
     
-    startEngine(config, gatewayConfig, serversConfig, redisConfig);
+    startEngine(config, gatewayConfig, serversConfig);
 }
 
-export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[], engineRedisConfig?:EngineRedisConfig) => {
+export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:EngineGatewayConfig, engineServersConfig?:EngineServersConfig[]) => {
     config = engineConfig;
     gatewayConfig = engineGatewayConfig;
     serversConfig = engineServersConfig;
-    redisConfig = engineRedisConfig;
     Object.seal(config);
     Object.seal(gatewayConfig);
     Object.seal(serversConfig);
-    Object.seal(redisConfig);
     //https://stackoverflow.com/questions/9781218/how-to-change-node-jss-console-font-color
     console.log(`\x1b[32m================================================================ \x1b[0m`)
     console.log(`\x1b[32m SERVER \x1b[1m\x1b[34mv.${ServerVersion}\x1b[0m\x1b[32m Build \x1b[1m\x1b[34m${ServerBuildNumber}\x1b[0m`);
@@ -74,68 +71,64 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
     ioServerOverHttp.on('connection', manageWSClientConnection);
     if(httpsServer) ioServerOverHttps.on('connection', manageWSClientConnection);
     /**
-     * REDIS CONNECTION
+     * LOAD MODULES
      */
-    startRedis().then(()=>{
+    importModules().then(()=>{
         /**
-         * LOAD MODULES
+         * CONNECT TO GATEWAY / REMOTE SERVERS
          */
-        importModules().then(()=>{
-            /**
-             * CONNECT TO GATEWAY / REMOTE SERVERS
-             */
-            startRemotes().then(()=>{
-                addService(undefined, {
-                    get:'/api',
-                    serviceType: 'json',
-                    public:false,
-                    excludeFromReplicas:true,
-                    serviceState: "stateless",
-                    manager: getApiDictionary
-                })
-                addService(undefined, {
-                    post:'/api/server/remoteRequest',
-                    serviceType: 'json',
-                    public:false,
-                    serviceState: "stateless",
-                    excludeFromReplicas:true,
-                    manager: manageRemoteRequest
-                })
-                addService(undefined, {
-                    post:'/api/server/remoteServer',
-                    serviceType: 'json',
-                    excludeFromReplicas:true,
-                    public:false,
-                    serviceState: "stateless",
-                    manager: manageRemoteServer
-                })
-                addService(undefined,{
-                    get:'/api/server/ping',
-                    serviceType: 'json',
-                    public: false,
-                    excludeFromReplicas:true,
-                    serviceState: "stateless",
-                    manager: aliveServerManager
-                });
-                addService(undefined,{
-                    post:'/api/server/service',
-                    serviceType:'json',
-                    excludeFromReplicas:true,
-                    public:false,
-                    serviceState: "stateless",
-                    manager:getGatewayServiceManager
-                });
-                httpServer.listen(config.PORT);
-                console.log(`\x1b[32mListening on port \x1b[34m${config.PORT}\x1b[0m`);
-                if(httpsServer && config.HTTPS_PORT){
-                    httpsServer.listen(config.HTTPS_PORT);
-                    console.log(`\x1b[32mListening on port \x1b[34m${config.HTTPS_PORT}\x1b[0m`);
-                }
-                console.log(`\x1b[32m================================================================\x1b[0m`)
-                events.emit('serverReady');
+        startRemotes().then(()=>{
+            addService(undefined, {
+                get:'/api',
+                serviceType: 'json',
+                public:false,
+                excludeFromReplicas:true,
+                serviceState: "stateless",
+                manager: getApiDictionary
             })
+            addService(undefined, {
+                post:'/api/server/remoteRequest',
+                serviceType: 'json',
+                public:false,
+                serviceState: "stateless",
+                excludeFromReplicas:true,
+                manager: manageRemoteRequest
+            })
+            addService(undefined, {
+                post:'/api/server/remoteServer',
+                serviceType: 'json',
+                excludeFromReplicas:true,
+                public:false,
+                serviceState: "stateless",
+                manager: manageRemoteServer
+            })
+            addService(undefined,{
+                get:'/api/server/ping',
+                serviceType: 'json',
+                public: false,
+                excludeFromReplicas:true,
+                serviceState: "stateless",
+                manager: aliveServerManager
+            });
+            addService(undefined,{
+                post:'/api/server/service',
+                serviceType:'json',
+                excludeFromReplicas:true,
+                public:false,
+                serviceState: "stateless",
+                manager:getGatewayServiceManager
+            });
+            httpServer.listen(config.PORT);
+            console.log(`\x1b[32mListening on port \x1b[34m${config.PORT}\x1b[0m`);
+            if(httpsServer && config.HTTPS_PORT){
+                httpsServer.listen(config.HTTPS_PORT);
+                console.log(`\x1b[32mListening on port \x1b[34m${config.HTTPS_PORT}\x1b[0m`);
+            }
+            console.log(`\x1b[32m================================================================\x1b[0m`)
+            events.emit('serverReady');
         })
     })
+
 }
 export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
     var config = {
@@ -199,16 +192,7 @@ export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) =>
     
     addServerConfig();
 
-
-    let redisConfig:EngineRedisConfig|undefined = undefined; 
-    if(processEnv.REDIS){
-        redisConfig = {
-            HOST: processEnv.REDIS?.toLowerCase?.() === 'true' ? true : processEnv.REDIS,
-            PASSWORD:processEnv.REDIS_PASSWORD
-        }
-    } 
-
-    return ({config, gatewayConfig, serversConfig, redisConfig});
+    return ({config, gatewayConfig, serversConfig});
 }
 /**
  * LIVE CONNECTION ON THE RemoteServer SIDE
@@ -266,35 +250,14 @@ const manageWSClientConnection = (socket:Socket) => {
         }
     });
 }
-const startRedis = ():Promise<void> => new Promise(resolve=>{
-    if(redisConfig){
-        initRedis().then(client=>{
-            redisClient = client as RedisClientType;
-            redisClientEnabled = true;
-            console.log('\x1b[32mREDIS \x1b[34mENABLED\x1b[0m');
-            Session.setAdapterType('redis');
-            resolve();
-        })
-    }else{
-        redisClientEnabled = false;
-        redisClient = undefined;
-        Session.setAdapterType('memory');
-        resolve();
-    }
-})
-const importModules = ():Promise<void> => new Promise(resolve=>{
-    const modulePromises:Promise<void>[] = []
+const importModules = async () => {
     if(config.MODULES && config.MODULES.length>0){
-        config.MODULES.forEach(async (module) => {
-            modulePromises.push(importModule(module.trim()));
-        })
+        for(const module of config.MODULES){
+            await importModule(module.trim());
+        }
     }
-
-    Promise.all(modulePromises).then(()=>{
-        console.log('\x1b[32mModules ready\x1b[0m');
-        resolve();
-    })
-})
+    return;
+}
 const startRemotes = ():Promise<void> => new Promise(resolve=>{
     const remotesPromises:Promise<void|RemoteServerConfig>[] = []
     if(gatewayConfig){

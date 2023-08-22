@@ -1,21 +1,14 @@
-import { GenericObject, SessionValue } from "../Types";
-import { ISessionAdapterStatic, ISessionAdapter, EmptyAdapter } from "./Adapters/SessionAdapter";
-import { MemoryAdapter, StaticMemoryAdapter } from "./Adapters/MemoryAdapter";
-import { RedisAdapter, StaticRedisAdapter } from "./Adapters/RedisAdapter";
-
-type AdapterType = "memory" | "redis";
+import { SessionValue } from "../Types";
+import { ISessionInstanceAdapter, ISessionAdapter, EmptyAdapter } from "./Adapters/SessionAdapter";
+import SessionAdapter from "./Adapters/MemoryAdapter";
 
 export default class Session {
-    private static _adapterType = "";
-    private static _staticAdapter:ISessionAdapterStatic;
-    private _adapter:ISessionAdapter;
+    //private static _adapterType = "";
+    private static _staticAdapter:ISessionAdapter = SessionAdapter;
+    private _adapter:ISessionInstanceAdapter;
     constructor (public id:string){
         if(id && id.trim && id.trim()!=""){
-            if(Session._adapterType == "memory"){
-                this._adapter = new MemoryAdapter(this);
-            }else{
-                this._adapter = new RedisAdapter(this);
-            }
+            this._adapter = Session._staticAdapter.getAdapter(this);
         }else{
             this._adapter = new EmptyAdapter(this);
         }
@@ -33,17 +26,8 @@ export default class Session {
     toGenericObject(){
         return this._adapter.toGenericObject();
     }
-    
-    static setAdapterType(adapterType:AdapterType){
-        Session._adapterType = adapterType;
-        switch(adapterType){
-            case "memory":
-                Session._staticAdapter = StaticMemoryAdapter;
-                break;
-            case "redis":
-                Session._staticAdapter = StaticRedisAdapter;
-                break;
-        }
+    static setAdapter(staticAdapter:ISessionAdapter){
+        Session._staticAdapter = staticAdapter;
     }
     static get(sessionId:string){
         return Session._staticAdapter.get(sessionId)
