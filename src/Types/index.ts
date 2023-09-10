@@ -16,6 +16,7 @@ export { ClientRequest };
 
 export type Module = {
     init: Function
+    version?:string,
     Services:Service[],
     renderer: (response:GenericObject, lang:string|string[]|undefined) => string | undefined,
     requestManager?: RequestManager,

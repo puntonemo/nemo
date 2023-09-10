@@ -19,8 +19,8 @@ import base64url from "base64url";
 import { ISessionInstanceAdapter, ISessionAdapter } from './Session/Adapters/SessionAdapter';
 export { Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServerConnection, PolicyChecker, httpClientRequest, SessionValue, ISessionInstanceAdapter, ISessionAdapter, fetch, crypto, base64url};
 
-export const ServerVersion = '3.0.19.1';
-export const ServerBuildNumber = 16926624; // Date.parse('2023-08-22').valueOf()/100000
+export const ServerVersion = '3.0.19.2';
+export const ServerBuildNumber = 16933536; // Date.parse('2023-08-30').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -44,8 +44,8 @@ export var serversConfig:EngineServersConfig[] | undefined;
 
 var modules:Map<string, ModuleConfig> = new Map();
 
-const bootstrap = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
-    const {config, gatewayConfig, serversConfig} = configureEngine(processEnv, dirname);
+const bootstrap = (dirname:string) => {
+    const {config, gatewayConfig, serversConfig} = configureEngine(dirname);
     
     startEngine(config, gatewayConfig, serversConfig);
 }
@@ -130,8 +130,9 @@ export const startEngine = (engineConfig:EngineConfig, engineGatewayConfig?:Engi
     })
 
 }
-export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) => {
-    var config = {
+export const configureEngine = (dirname:string) => {
+    const processEnv = process.env;
+    let config = {
         "CONFIG_NAME" : processEnv.CONFIG_NAME || "default",
         "PORT" : processEnv.PORT ? Number.parseInt(processEnv.PORT, 10) : 3000,
         "HTTPS_PORT" : processEnv.HTTPS_PORT ? Number.parseInt(processEnv.HTTPS_PORT, 10) : undefined,
@@ -150,7 +151,7 @@ export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) =>
         "GATEWAY_AUTO_ATTACH_PASSKEY" : processEnv.GATEWAY_AUTO_ATTACH_PASSKEY
     }
     
-    var gatewayConfig = undefined;
+    let gatewayConfig = undefined;
     if (processEnv.REMOTE_HOST){ // CONNECT TO A GATEWAY
         if(processEnv.REMOTE_HOST && processEnv.LOCAL_HOST && processEnv.PASSKEY){
             gatewayConfig = {
@@ -167,7 +168,7 @@ export const configureEngine = (processEnv:NodeJS.ProcessEnv, dirname:string) =>
         }
     }
     
-    var serversConfig:EngineServersConfig[] = [];
+    let serversConfig:EngineServersConfig[] = [];
     
     const addServerConfig = (index?:number) => {
         if(index === undefined) index = 0;
@@ -301,10 +302,12 @@ const ListenRemoteEvents = () => {
     console.log('\x1b[32mListening to remote events\x1b[0m');
 }
 export const importModule = async (module:string) => {
-    console.log(`\x1b[32mModule: \x1b[34m${module}\x1b[0m`);
     const pathName = path.join(config.MODULES_PATH || './', module);
     const moduleItem = require(pathName) as Module;
+    console.log(`\x1b[32mModule: \x1b[34m${module} \x1b[32mVersion \x1b[34m${moduleItem.version}\x1b[0m`);
+
     let moduleConfig:ModuleConfig = {};
+    
     if(moduleItem.init) await moduleItem.init();
     if(moduleItem.renderer) moduleConfig.renderer = moduleItem.renderer;
     if(moduleItem.requestManager) moduleConfig.requestManager = moduleItem.requestManager;
@@ -314,8 +317,7 @@ export const importModule = async (module:string) => {
     modules.set(module, moduleConfig);
 
     if(moduleItem.Services){
-        for (const Service of moduleItem.Services) {
-            
+        for (const Service of moduleItem.Services) {        
             if(Service.serviceType !== 'static') addService(module, Service);
             if(Service.serviceType === 'static') addStaticService(module, Service);
         }
