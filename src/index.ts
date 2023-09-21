@@ -17,10 +17,11 @@ import { Server } from "socket.io";
 import crypto from 'crypto';
 import base64url from "base64url";
 import { ISessionInstanceAdapter, ISessionAdapter } from './Session/Adapters/SessionAdapter';
-export { Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServerConnection, PolicyChecker, httpClientRequest, SessionValue, ISessionInstanceAdapter, ISessionAdapter, fetch, crypto, base64url};
+import SchemaValidator, {ISchemaValidator, SchemaValidatorError, EmptySchemaValidator} from './SchemaValidator';
+export { Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServerConnection, PolicyChecker, httpClientRequest, SessionValue, ISessionInstanceAdapter, ISessionAdapter, fetch, crypto, base64url, SchemaValidator, ISchemaValidator, SchemaValidatorError};
 
-export const ServerVersion = '3.0.19.2';
-export const ServerBuildNumber = 16933536; // Date.parse('2023-08-30').valueOf()/100000
+export const ServerVersion = '3.0.20';
+export const ServerBuildNumber = 16951680; // Date.parse('2023-09-19').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
@@ -43,6 +44,8 @@ export var serversConfig:EngineServersConfig[] | undefined;
 //export var coreProcessRoot = process.argv.length>0 ? process.argv[1].split('/').slice(0,-1).join('/') : process.env.PWD;
 
 var modules:Map<string, ModuleConfig> = new Map();
+
+SchemaValidator.setAdapter(EmptySchemaValidator);
 
 const bootstrap = (dirname:string) => {
     const {config, gatewayConfig, serversConfig} = configureEngine(dirname);
@@ -646,25 +649,41 @@ const manageHttpService = async (req: Request, res:Response, Service:InternalSer
             if(!res.headersSent && next) next();
         })
     }else{
-        const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-        const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-        
-        const managedRequest = requestManager(request);
-        if(Service.requestCert && req){
 
-            getPeerCertificate(req).then((cert:Object)=>{
-                managedRequest.certificate = cert;
-                invokeHttpService(Service, managedRequest, responseManager, res, next);
-            }).catch((error:any)=>{
-                console.log('error getting certificate (https)', error);
-                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
-                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
-                managedRequest.toGenericObject().then(managedRequestGO=>{
-                    events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
-                })
+        
+        let paramSchemaValidationPass: true | SchemaValidatorError = true;
+        if(Service.paramsSchema){
+            paramSchemaValidationPass = await SchemaValidator.validate(request.params, Service.paramsSchema);
+        }
+        if(paramSchemaValidationPass!==true){
+            request.toGenericObject().then(managedRequestGO=>{
+                const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:paramSchemaValidationPass}}
+                events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, paramSchemaValidationPass);
+                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, paramSchemaValidationPassStatus);
+                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, paramSchemaValidationPassStatus, request.lang);
+                if(!res.headersSent && next) next();
             })
-        }else{
-            invokeHttpService(Service, managedRequest, responseManager, res, next);
+        }else{        
+            const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
+            const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+            
+            const managedRequest = requestManager(request);
+            if(Service.requestCert && req){
+
+                getPeerCertificate(req).then((cert:Object)=>{
+                    managedRequest.certificate = cert;
+                    invokeHttpService(Service, managedRequest, responseManager, res, next);
+                }).catch((error:any)=>{
+                    console.log('error getting certificate (https)', error);
+                    if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
+                    if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
+                    managedRequest.toGenericObject().then(managedRequestGO=>{
+                        events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                    })
+                })
+            }else{
+                invokeHttpService(Service, managedRequest, responseManager, res, next);
+            }
         }
     }
 }
@@ -811,34 +830,46 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
             console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
             events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
             socket.emit('error', tid, errorPolicyStatus);
-            
         })
     }else{
-        //if(!isServerRequest){
+        let paramSchemaValidationPass: true | SchemaValidatorError = true;
+        if(Service.paramsSchema){
+            paramSchemaValidationPass = await SchemaValidator.validate(request.params, Service.paramsSchema);
+        }
+
+        if(paramSchemaValidationPass!==true){
+            request.toGenericObject().then(managedRequestGO=>{
+                const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:paramSchemaValidationPass}}
+                events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, paramSchemaValidationPass);
+                socket.emit('error', tid, paramSchemaValidationPassStatus);
+            })
+        }else{
+            //if(!isServerRequest){
             const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
             const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-        //}
-        
-        if(request){      
-            const managedRequest = requestManager(request);
+            //}
+            
+            if(request){      
+                const managedRequest = requestManager(request);
 
-            if(Service.requestCert && socket.request){
-                const req = socket.request as Request;
-                
-                managedRequest.willResolve({status:'renegotiating'});
-                getPeerCertificate(req).then((cert:Object)=>{
-                    managedRequest.certificate = cert;
-                    invokeWSService(Service, managedRequest, responseManager, socket, tid);
-                }).catch(error=>{
-                    console.log('error getting certificate (wss)', error);
-                    socket.emit('error', tid, error);
-                    managedRequest.toGenericObject().then(managedRequestGO=>{
-                        events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                if(Service.requestCert && socket.request){
+                    const req = socket.request as Request;
+                    
+                    managedRequest.willResolve({status:'renegotiating'});
+                    getPeerCertificate(req).then((cert:Object)=>{
+                        managedRequest.certificate = cert;
+                        invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                    }).catch(error=>{
+                        console.log('error getting certificate (wss)', error);
+                        socket.emit('error', tid, error);
+                        managedRequest.toGenericObject().then(managedRequestGO=>{
+                            events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                        })
                     })
-                })
-                
-            }else{
-                invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                    
+                }else{
+                    invokeWSService(Service, managedRequest, responseManager, socket, tid);
+                }
             }
         }
     }

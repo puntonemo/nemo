@@ -60,6 +60,7 @@ export type Service = {
     manager?: Manager,
     renderer?: Renderer,
     parameters?:string,
+    paramsSchema?:GenericObject     // Schema Validator for Service input parameters
     requestCert?:boolean,           // Request to renegotiate for a Client Certificate
     server?:string,                 // Internal use to set the remote server where de service is allocated
     requestManager?: RequestManager,
