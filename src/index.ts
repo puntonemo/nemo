@@ -1,5 +1,5 @@
 import express, {Request, Response} from 'express'
-import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, PolicyChecker, httpClientRequest, SessionValue} from './Types';
+import { Service, Module, GenericObject, ModuleConfig, ResponseManager, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServiceState, PolicyChecker, httpClientRequest, SessionValue, RequestManager} from './Types';
 import ClientRequest from './ClientRequest';
 import { NextFunction } from 'express-serve-static-core';
 import { parseCookie, makeid, fetch } from './tools';
@@ -20,11 +20,12 @@ import { ISessionInstanceAdapter, ISessionAdapter } from './Session/Adapters/Ses
 import SchemaValidator, {ISchemaValidator, SchemaValidatorError, EmptySchemaValidator} from './SchemaValidator';
 export { Request, Response, Socket, Service, GenericObject, ClientRequest, Session, RemoteServerConfig, GatewayConfig, EngineConfig, EngineGatewayConfig, EngineServersConfig, ServerConnection, PolicyChecker, httpClientRequest, SessionValue, ISessionInstanceAdapter, ISessionAdapter, fetch, crypto, base64url, SchemaValidator, ISchemaValidator, SchemaValidatorError};
 
-export const ServerVersion = '3.0.20';
-export const ServerBuildNumber = 16951680; // Date.parse('2023-09-19').valueOf()/100000
+export const ServerVersion = '3.0.23';
+export const ServerBuildNumber = 16956864; // Date.parse('2023-09-21').valueOf()/100000
 const sessionIdParamName = 'sid';
 const deviceIdParamName = 'did';
 const defaultServiceState:ServiceState = "stateful";
+
 
 var app:ExpressCore.Express;
 
@@ -43,7 +44,7 @@ export var gatewayConfig:EngineGatewayConfig | undefined;
 export var serversConfig:EngineServersConfig[] | undefined;
 //export var coreProcessRoot = process.argv.length>0 ? process.argv[1].split('/').slice(0,-1).join('/') : process.env.PWD;
 
-var modules:Map<string, ModuleConfig> = new Map();
+export var modules:Map<string, ModuleConfig> = new Map();
 
 SchemaValidator.setAdapter(EmptySchemaValidator);
 
@@ -144,6 +145,7 @@ export const configureEngine = (dirname:string) => {
         "HTTPS_CA_FILE" : processEnv.HTTPS_CA_FILE ? path.join(dirname, processEnv.HTTPS_CA_FILE) : undefined,
         "HTTPS_PASSPHRASE" : processEnv.HTTPS_PASSPHRASE,
         "HTTPS_CIPHERS" : processEnv.HTTPS_CIPHERS,
+        "HTTPS_SECURE_PROTOCOL": processEnv.HTTPS_SECURE_PROTOCOL,
         "MAX_BODY_SIZE" : processEnv.MAX_BODY_SIZE || "2mb",
         "MAX_HTTP_BUFFER_SIZE" : processEnv.MAX_HTTP_BUFFER_SIZE ? Number.parseInt(processEnv.MAX_HTTP_BUFFER_SIZE) : 100000000,
         "MODULES_PATH" : processEnv.MODULES_PATH ? path.join(dirname, processEnv.MODULES_PATH) : "./modules",
@@ -316,7 +318,8 @@ export const importModule = async (module:string) => {
     if(moduleItem.requestManager) moduleConfig.requestManager = moduleItem.requestManager;
     if(moduleItem.responseManager) moduleConfig.responseManager = moduleItem.responseManager;
     if(moduleItem.policy) moduleConfig.policy = moduleItem.policy;
-
+    if(moduleItem.version) moduleConfig.version = moduleItem.version;
+    if(moduleItem.description) moduleConfig.description = moduleItem.description;
     modules.set(module, moduleConfig);
 
     if(moduleItem.Services){
@@ -629,60 +632,90 @@ const checkServicePolicyPass = async (request:ClientRequest, Service:InternalSer
  * @param next Next Function
  */
 const manageHttpService = async (req: Request, res:Response, Service:InternalService, next: NextFunction) =>{
-    const request = await manageHttpRequest(req, res, Service);
-
-    let policyPass = true;
-    let policyError:GenericObject|undefined = undefined;
+    /* GLOBAL REQUEST MANAGERS*/
+    let managedRequest = await manageHttpRequest(req, res, Service);
+    let managedRequestError: { message: any; } | undefined = undefined;
     try{
-        policyPass = await checkServicePolicyPass(request, Service)
-    }catch(error){
-        policyPass = false;
-        policyError = error as GenericObject;
+        for(const globalRequestManager of globalRequestManagers){
+            managedRequest = await globalRequestManager(managedRequest);
+        }
+        
+        /* MODULE REQUEST MANAGER */
+        if(Service.moduleName){
+            const module = modules.get(Service.moduleName);
+            if(module && module.requestManager){
+                managedRequest = await module.requestManager(managedRequest);
+            }
+        }
+        /* SERVICE REQUEST MANAGER */
+        if (Service.requestManager){
+            managedRequest = await Service.requestManager(managedRequest);
+        }
+    }catch(error:any){
+        managedRequestError = error;
     }
-    if(!policyPass){
-        request.toGenericObject().then(managedRequestGO=>{
-            const errorPolicyStatus = {...{status:401}, ...policyError}
-            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
-            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
-            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, errorPolicyStatus);
-            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, errorPolicyStatus, request.lang);
+
+    if(managedRequestError){
+        managedRequest.toGenericObject().then(managedRequestGO=>{
+            const managedRequestStatusError = { error : managedRequestError?.message ?? managedRequestError}
+            const managedRequesStatus = {...{status:500}, ...managedRequestStatusError}
+            events.emit('managedRequestStatusError', managedRequestGO, 'managedRequestStatusError', Service.name, managedRequesStatus);
+            if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, managedRequesStatus);
+            if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, managedRequesStatus, managedRequest.lang);
             if(!res.headersSent && next) next();
         })
     }else{
-
-        
-        let paramSchemaValidationPass: true | SchemaValidatorError = true;
-        if(Service.paramsSchema){
-            paramSchemaValidationPass = await SchemaValidator.validate(request.params, Service.paramsSchema);
+        let policyPass = true;
+        let policyError:GenericObject|undefined = undefined;
+        try{
+            policyPass = await checkServicePolicyPass(managedRequest, Service)
+        }catch(error){
+            policyPass = false;
+            policyError = error as GenericObject;
         }
-        if(paramSchemaValidationPass!==true){
-            request.toGenericObject().then(managedRequestGO=>{
-                const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:paramSchemaValidationPass}}
-                events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, paramSchemaValidationPass);
-                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, paramSchemaValidationPassStatus);
-                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, paramSchemaValidationPassStatus, request.lang);
+        if(!policyPass){
+            managedRequest.toGenericObject().then(managedRequestGO=>{
+                const errorPolicyStatus = {...{status:401}, ...policyError}
+                events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
+                if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, errorPolicyStatus);
+                if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, errorPolicyStatus, managedRequest.lang);
                 if(!res.headersSent && next) next();
             })
-        }else{        
-            const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-            const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-            
-            const managedRequest = requestManager(request);
-            if(Service.requestCert && req){
-
-                getPeerCertificate(req).then((cert:Object)=>{
-                    managedRequest.certificate = cert;
-                    invokeHttpService(Service, managedRequest, responseManager, res, next);
-                }).catch((error:any)=>{
-                    console.log('error getting certificate (https)', error);
-                    if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
-                    if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, request.lang);
+        }else{
+            let paramSchemaValidationPass = true;
+            if(Service.paramsSchema){
+                try{
+                    managedRequest.params = await SchemaValidator.validate(managedRequest.params, Service.paramsSchema);
+                }catch(error:any){
+                    paramSchemaValidationPass = false;
                     managedRequest.toGenericObject().then(managedRequestGO=>{
-                        events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                        const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:error}}
+                        events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, error);
+                        if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, paramSchemaValidationPassStatus);
+                        if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, paramSchemaValidationPassStatus, managedRequest.lang);
+                        if(!res.headersSent && next) next();
                     })
-                })
-            }else{
-                invokeHttpService(Service, managedRequest, responseManager, res, next);
+                }
+            }
+            if(paramSchemaValidationPass){
+                const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+                
+                if(Service.requestCert && req){
+    
+                    getPeerCertificate(req).then((cert:Object)=>{
+                        managedRequest.certificate = cert;
+                        invokeHttpService(Service, managedRequest, responseManager, res, next);
+                    }).catch((error:any)=>{
+                        console.log('error getting certificate (https)', error);
+                        if(['json', 'form'].includes(Service.serviceType)) resolveJsonServiceDefault(false, res, error);
+                        if(Service.serviceType == 'render') resolveRenderServiceDefault(Service, res, error, managedRequest.lang);
+                        managedRequest.toGenericObject().then(managedRequestGO=>{
+                            events.emit('invokeServiceError', managedRequestGO, error, Service.name, error);
+                        })
+                    })
+                }else{
+                    invokeHttpService(Service, managedRequest, responseManager, res, next);
+                }
             }
         }
     }
@@ -708,9 +741,12 @@ const manageHttpRequest = async (req: Request, res:Response, Service:InternalSer
     //    }
     //}
     
-
+    //TODO MANAGE ALLOWED DOMAINS!!!
+    if(!res.headersSent){
+        res.setHeader(`Access-Control-Allow-Origin`, `*`);
+    }
     //MANAGE RESPONSE
-    const stateless = req.headers['server-request'] == 'true' || Service.serviceState == "stateless"
+    const stateless = req.headers['server-request'] == 'true' || req.headers['sec-fetch-mode'] == 'cors' || Service.serviceState == "stateless"
     if(!stateless){
         //#region Send SessionId cookie
         if(!res.headersSent){
@@ -807,51 +843,73 @@ const invokeHttpService = (Service:InternalService, managedRequest:ClientRequest
 }
 const manageWSService = async (socket:Socket, Service:InternalService, ServiceParams:any, tid:string, serverRequest?:GenericObject) => {
     
-    const isServerRequest = serverRequest ? true : false;
-    
-    if(isServerRequest){
-        console.log('Its a server request');
-    }
-
-    const request = await manageWSRequest(socket, Service, ServiceParams ?? {}, tid, serverRequest);
-
-    let policyPass = true;
-    let policyError:GenericObject|undefined = undefined;
+    /* GLOBAL REQUEST MANAGERS*/
+    let managedRequest = await manageWSRequest(socket, Service, ServiceParams ?? {}, tid, serverRequest);
+    let managedRequestError: { message: any; } | undefined = undefined;
     try{
-        policyPass = await checkServicePolicyPass(request, Service)
-    }catch(error){
-        policyPass = false;
-        policyError = error as GenericObject;
+        for(const globalRequestManager of globalRequestManagers){
+            managedRequest = await globalRequestManager(managedRequest);
+        }
+        
+        /* MODULE REQUEST MANAGER */
+        if(Service.moduleName){
+            const module = modules.get(Service.moduleName);
+            if(module && module.requestManager){
+                managedRequest = await module.requestManager(managedRequest);
+            }
+        }
+        /* SERVICE REQUEST MANAGER */
+        if (Service.requestManager){
+            managedRequest = await Service.requestManager(managedRequest);
+        }
+    }catch(error:any){
+        managedRequestError = error;
     }
 
-    if(!policyPass){
-        request.toGenericObject().then(managedRequestGO=>{
-            const errorPolicyStatus = {...{status:401}, ...policyError}
-            console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
-            events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
-            socket.emit('error', tid, errorPolicyStatus);
+    if(managedRequestError){
+        managedRequest.toGenericObject().then(managedRequestGO=>{
+            const managedRequestStatusError = { error : managedRequestError?.message ?? managedRequestError}
+            const managedRequesStatus = {...{status:500}, ...managedRequestStatusError}
+            events.emit('managedRequestStatusError', managedRequestGO, 'managedRequestStatusError', Service.name, managedRequesStatus);
+            socket.emit('error', tid, managedRequesStatus);
         })
-    }else{
-        let paramSchemaValidationPass: true | SchemaValidatorError = true;
-        if(Service.paramsSchema){
-            paramSchemaValidationPass = await SchemaValidator.validate(request.params, Service.paramsSchema);
+    }else
+    {
+        let policyPass = true;
+        let policyError:GenericObject|undefined = undefined;
+        try{
+            policyPass = await checkServicePolicyPass(managedRequest, Service)
+        }catch(error){
+            policyPass = false;
+            policyError = error as GenericObject;
         }
-
-        if(paramSchemaValidationPass!==true){
-            request.toGenericObject().then(managedRequestGO=>{
-                const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:paramSchemaValidationPass}}
-                events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, paramSchemaValidationPass);
-                socket.emit('error', tid, paramSchemaValidationPassStatus);
+    
+        if(!policyPass){
+            managedRequest.toGenericObject().then(managedRequestGO=>{
+                const errorPolicyStatus = {...{status:401}, ...policyError}
+                console.log(`invokeServiceError. serverPolicyNotPassed for ${Service.name}`);
+                events.emit('invokeServiceError', managedRequestGO, 'serverPolicyNotPassed', Service.name, errorPolicyStatus);
+                socket.emit('error', tid, errorPolicyStatus);
             })
         }else{
-            //if(!isServerRequest){
-            const requestManager = Service.requestManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.requestManager || defaultRequestManager;
-            const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
-            //}
-            
-            if(request){      
-                const managedRequest = requestManager(request);
-
+            let paramSchemaValidationPass = true;
+            if(Service.paramsSchema){
+                try{
+                    managedRequest.params = await SchemaValidator.validate(managedRequest.params, Service.paramsSchema);
+                }catch(error:any){
+                    paramSchemaValidationPass = false;
+                    managedRequest.toGenericObject().then(managedRequestGO=>{
+                        const paramSchemaValidationPassStatus = {...{status:400}, ...{result : "error"}, ...{message:`service parameters schema validation not passed on service ${Service.name ?? 'unknown'}`}, ...{issues:error}}
+                        events.emit('invokeServiceError', managedRequestGO, 'paramSchemaValidationNotPassed', Service.name, error);
+                        socket.emit('error', tid, paramSchemaValidationPassStatus);
+                    })
+                }
+            }
+            if(paramSchemaValidationPass){
+    
+                const responseManager = Service.responseManager || (Service.moduleName ? modules.get(Service.moduleName) : undefined)?.responseManager || defaultResponseManager;
+                
+    
                 if(Service.requestCert && socket.request){
                     const req = socket.request as Request;
                     
@@ -870,6 +928,7 @@ const manageWSService = async (socket:Socket, Service:InternalService, ServicePa
                 }else{
                     invokeWSService(Service, managedRequest, responseManager, socket, tid);
                 }
+                
             }
         }
     }
@@ -978,9 +1037,6 @@ const resolveRenderServiceDefault = (Service:InternalService, res:Response, resp
         //}
         //if(res.headersSent) res.render('index', response);
     }
-}
-const defaultRequestManager = (request:ClientRequest) => {
-    return request;
 }
 const defaultResponseManager = (response:GenericObject, _request:ClientRequest, _res?:Response) => {
     return response;
@@ -1210,4 +1266,8 @@ export const addPolicy = (policyChecker:PolicyChecker) => {
     policyCheckers.push(policyChecker);
 }
 let policyCheckers:PolicyChecker[] = [];
+let globalRequestManagers:RequestManager[] = [];
+export const addGlobalRequestManager = (requestManager:RequestManager) => {
+    globalRequestManagers.push(requestManager);
+}
 export default bootstrap;

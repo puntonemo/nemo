@@ -2,12 +2,14 @@ import ClientRequest from '../ClientRequest';
 import ServerConnection from '../ServerConnection';
 import { Request, Response } from 'express';
 import { Socket } from 'socket.io';
+
+
 import * as http from 'http';
 
 export type ServiceState = "stateful" | "stateless"
 export type Renderer = (response:GenericObject, lang:string|string[]|undefined) => string | undefined;
 export type Manager = (request: ClientRequest) => Promise<Object>;
-export type RequestManager = (request:ClientRequest) => ClientRequest;
+export type RequestManager = (request:ClientRequest) => ClientRequest | Promise<ClientRequest>;
 export type ResponseManager = (response:GenericObject, request:ClientRequest, res?:Response) => GenericObject|undefined;
 export type PolicyChecker = (request:ClientRequest) => boolean | Promise<boolean>;
 export type httpClientRequest = http.ClientRequest;
@@ -17,6 +19,7 @@ export { ClientRequest };
 export type Module = {
     init: Function
     version?:string,
+    description?:string,
     Services:Service[],
     renderer: (response:GenericObject, lang:string|string[]|undefined) => string | undefined,
     requestManager?: RequestManager,
@@ -27,7 +30,9 @@ export type ModuleConfig = {
     renderer?: (response:GenericObject, lang:string|string[]|undefined) => string | undefined
     requestManager?: RequestManager
     responseManager?: ResponseManager
-    policy?:PolicyChecker
+    policy?: PolicyChecker
+    version?: string
+    description?: string
 }
 export type GenericObject = {[k: string]: any};
 
@@ -48,6 +53,7 @@ export type ServiceProxyOptions = {
 
 export type Service = {
     name?: string,                  // Service Name
+    description?:string,            // Service Description
     path?:string,                   // Local path for 'static' services
     get?: string,                   // Route to GET method
     post?: string,                  // Route to POST method
@@ -70,6 +76,7 @@ export type Service = {
     excludeFromReplicas?:boolean,   // Exclude this service from remote replicas
     serviceState?:ServiceState,     // Stateless / Statefull
     policy?:PolicyChecker           // Service Policy Checker
+
 }
 export type EngineConfig = {
     CONFIG_NAME:string,
@@ -79,7 +86,8 @@ export type EngineConfig = {
     HTTPS_CERT_FILE? : string,
     HTTPS_CA_FILE? : string,
     HTTPS_PASSPHRASE? : string,
-    HTTPS_CIPHERS? : string
+    HTTPS_CIPHERS? : string,
+    HTTPS_SECURE_PROTOCOL?: string,
     MAX_BODY_SIZE?: string,
     MAX_HTTP_BUFFER_SIZE?: number,
     MODULES_PATH? : string,

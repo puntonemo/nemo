@@ -25,6 +25,7 @@ export default class ClientRequest {
     private _remoteRedirect: {url:string, status?:number} | undefined;
     private _session:Core.Session;
     private _remoteSession: GenericObject;
+    public auth: GenericObject;
     public certificate?: GenericObject;
     constructor(
         invokator: Request | Socket,
@@ -46,6 +47,7 @@ export default class ClientRequest {
             }
         }
         this._remoteSession = remoteRequest ? remoteRequest.session : session;
+        this.auth = remoteRequest ? remoteRequest.auth: undefined;
         if(invokator instanceof Socket){
             this._origin = remoteRequest ? "remote" : "ws";
             this._socket = invokator;
@@ -142,6 +144,7 @@ export default class ClientRequest {
                     if (this._remoteAddress) result.remoteAddress = this._remoteAddress;
                     if (this._socket) result.socketId = this._socket.id;
                     if (this._tid) result.tid = this._tid;
+                    if (this.auth) result.auth = this.auth;
                     resolve(result);
                 })
             }else{
@@ -156,6 +159,7 @@ export default class ClientRequest {
                 if (this.certificate) result.certificate = this.certificate;
                 if (this._remoteAddress) result.remoteAddress = this._remoteAddress;
                 if (this._socket) result.socket = this._socket.id;
+                if (this.auth) result.auth = this.auth;
                 resolve(result);
             }
         })

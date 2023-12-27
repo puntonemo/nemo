@@ -3,7 +3,7 @@ import { GenericObject } from "../Types";
 export type SchemaValidatorError = 
     GenericObject[]
 export interface ISchemaValidator {
-    validate(object:any,...params:any):Promise<true | SchemaValidatorError>
+    validate(object:any,...params:any):Promise<any>
 }
 
 class SchemaValidator {
@@ -17,10 +17,9 @@ class SchemaValidator {
 }
 
 export const EmptySchemaValidator:ISchemaValidator = {
-    async validate(object:any,...params:any){
+    async validate(object:any){
         if(object){
-            console.log(params);
-            return true;
+            return object;
         }else{
             return [{issue:`Object is undefined`}];
         }
